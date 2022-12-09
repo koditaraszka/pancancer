@@ -1,0 +1,1480 @@
+---
+title: "Pan-Cancer analysis of germline influences on somatic burden"
+author: "Kodi Taraszka"
+date: "6/11/2021"
+output:
+  word_document:
+    fig_caption: yes
+  html_document:
+    df_print: paged
+  fontsize: 11pt
+  pdf_document: default
+---
+
+
+```{r setup, include = F}
+rm(list=ls())
+gc()
+#library(ggfastman)
+library(dplyr)
+library(ggtext)
+library(tibble)
+library(metafor)
+library(ggplot2)
+library(stringr)
+library(scales)
+library(gridExtra)
+library(knitr)
+library(lemon)
+library(ggcorrplot)
+library(ggh4x)
+library(jcolors)
+library(ggsignif)
+library(patchwork)
+library(ggpubr)
+
+options(knitr.kable.NA = "---")
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+power_calculator = function(z, var1, var2, n1, n2){
+  ratio = (sqrt(var2)*sqrt(n2))/(sqrt(var1)*sqrt(n1))
+  z_new = abs(z)*ratio
+  p_new = pnorm(z_new, lower.tail = F)
+  return(c(z_new, p_new, (p_new < 0.05)))
+}
+
+all_theme = theme_bw() + theme(strip.background = element_blank(), axis.text =element_text( size = 12, color = "black"), axis.title = element_text(size = 12, color = "black"), legend.text = element_text(size = 12, color = "black"), legend.title = element_text(size = 12, color = "black"), plot.title = element_text(hjust = 0.5, size=12, color="black"), strip.text = element_text(size = 12, color = "black"), plot.tag = element_text(size=12, color = "black", face = "bold"))
+
+name = c("Bladder_Cancer", "Breast_Carcinoma","Cancer_of_Unknown_Primary", 
+         "Colorectal_Cancer","Endometrial_Cancer","Esophagogastric_Carcinoma",
+         "Glioma","Head_and_Neck_Carcinoma", "Leukemia", "Melanoma",
+         "Non-Hodgkin_Lymphoma","Non-Small_Cell_Lung_Cancer", "Ovarian_Cancer",
+         "Pancreatic_Cancer", "Prostate_Cancer", "Renal_Cell_Carcinoma", "Soft_Tissue_Sarcoma")
+
+the_name = c("Bladder Cancer", "Breast Carcinoma","Cancer of Unknown Primary", 
+         "Colorectal Cancer","Endometrial Cancer","Esophagogastric Carcinoma",
+         "Glioma","Head and Neck Carcinoma", "Leukemia", "Melanoma",
+         "Non-Hodgkin Lymphoma","Non-Small Cell Lung Cancer", "Ovarian Cancer",
+         "Pancreatic Cancer", "Prostate Cancer", "Renal Cell Carcinoma", "Soft Tissue Sarcoma")
+names = c("Bladder\nCancer", "Breast\nCarcinoma", "Cancer of\nUnknown Primary",
+         "Colorectal\nCancer", "Endometrial\nCancer", "Esophagogastric\nCarcinoma",
+         "Head and Neck\nCarcinoma", "Glioma", "Leukemia", "Melanoma", "Non-Hodgkin\nLymphoma",
+         "Non-Small Cell\nLung Cancer", "Ovarian\nCancer", "Pancreatic\nCancer",
+         "Prostate\nCancer", "Renal Cell\nCarcinoma", "Soft Tissue\nSarcoma")
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, 
+                           draw_group = function(self, data, ..., draw_quantiles = NULL) {
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1, "group"]
+  newdata <- plyr::arrange(transform(data, x = if (grp %% 2 == 1) xminv else xmaxv), if (grp %% 2 == 1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1, nrow(newdata) - 1, nrow(newdata)), "x"] <- round(newdata[1, "x"])
+
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <=
+      1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., 
+                              draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, 
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, 
+        position = position, show.legend = show.legend, inherit.aes = inherit.aes, 
+        params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
+
+ordered_cancers = c(names, "Pan-Cancer")
+ordered_cancers = factor(ordered_cancers, levels = ordered_cancers)
+the_cancer = c(the_name, "Pan-Cancer")
+the_cancer = factor(the_cancer, levels = the_cancer)
+```
+
+```{r initial_data, include = F}
+source("~/Desktop/Cancer/Burden/lr_prs.R")
+source("~/Desktop/Cancer/Burden/lr_clin_anc.R")
+bothcohorts = data
+
+tempus_data = data[which(data$Source=="Tempus"),]
+tempus_data["Normal-Match"] = "Yes"
+tempus_data[which(tempus_data$MATCH==0),"Normal-Match"] = "No"
+tempus_data$`Normal-Match` = factor(tempus_data$`Normal-Match`, levels = c("Yes", "No"))
+tempus_data$Cancer = str_replace_all(tempus_data$Cancer, "_", " ")
+tempus_data$Cancer = factor(tempus_data$Cancer, levels = the_cancer)
+normal_match_tmb = ggplot(tempus_data[which(tempus_data$TMB<50),], aes(x=TMB, fill = `Normal-Match`)) + geom_density() + facet_wrap(~Cancer, nrow=3, ncol = 5) + all_theme
+
+#FIGURES TO BE MADE TODAY
+allage = ggplot(data, aes(x=Source, y=AGE, fill = Source)) + geom_violin() + geom_boxplot(width = 0.2, alpha = 0.8, fill = 'grey', color = 'grey25') + all_theme + ylab("Age")
+allpurity = ggplot(data, aes(x=Source, y=Tumor_Purity, fill = Source)) + geom_violin() + geom_boxplot(width = 0.1, alpha = 0.8, fill = 'grey', color = 'grey25') + all_theme + ylab("Tumor Purity")
+allsex = ggplot(data, aes(x = Source, fill = SEX)) + geom_bar(position = 'fill', color = 'black') + scale_fill_manual(values = c("darkseagreen","darkorchid4")) + all_theme + ylab("Proportion")
+allmet = ggplot(data, aes(x = Source, fill = Metastatic)) + geom_bar(position = 'fill', color = 'black') + scale_fill_manual(values = c("grey25","darkred")) + all_theme + ylab("Proportion")
+((allage + guides(fill= 'none'))  + allsex)/((allpurity + guides(fill = 'none')) + allmet)
+
+covar_data = data
+covar_data$Cancer = str_replace_all(covar_data$Cancer, "_", "\n")
+covar_data[which(covar_data$Cancer=="Soft\nTissue\nSarcoma"),"Cancer"] = "Soft Tissue\nSarcoma"
+covar_data[which(covar_data$Cancer=="Cancer\nof\nUnknown\nPrimary"),"Cancer"] = "Cancer of\nUnknown Primary"
+covar_data[which(covar_data$Cancer=="Non-Small\nCell\nLung\nCancer"),"Cancer"] = "Non-Small Cell\nLung Cancer"
+covar_data[which(covar_data$Cancer=="Head\nand\nNeck\nCarcinoma"),"Cancer"] = "Head and Neck\nCarcinoma"
+covar_data[which(covar_data$Cancer=="Renal\nCell\nCarcinoma"),"Cancer"] = "Renal Cell\nCarcinoma"
+
+perage = ggplot(covar_data, aes(x=Cancer, y=AGE, fill = Source)) + geom_boxplot() + all_theme + ylab("Age")
+perpurity = ggplot(covar_data, aes(x=Cancer, y=Tumor_Purity, fill = Source)) + geom_boxplot() + all_theme + ylab("Tumor Purity")
+persex = ggplot(covar_data, aes(x = Source, fill = SEX)) + geom_bar(position = 'fill', color = 'black') + scale_fill_manual(values = c("darkseagreen","darkorchid4")) + all_theme + ylab("Proportion") + facet_wrap(~Cancer, ncol = 6)
+permet = ggplot(covar_data, aes(x = Source, fill = Metastatic)) + geom_bar(position = 'fill', color = 'black') + scale_fill_manual(values = c("grey25","darkred")) + all_theme + ylab("Proportion") + facet_wrap(~Cancer, ncol = 6)
+#((perage + guides(fill= 'none'))  + persex)/((perpurity + guides(fill = 'none')) + permet)
+```
+
+```{r covar_data, echo = F}
+profile_covars <- read.delim("~/Desktop/Cancer/Burden/Profile/covariates.txt", stringsAsFactors = F)
+profile_covars = profile_covars[-which(profile_covars$OUTCOME=="TMB"),]
+colnames(profile_covars) = c("Burden","Cancer","Covariate","Beta","Stderr","Zscore","Pvalue")
+profile_covars["Source"] = "Profile" 
+profile_covars["Sample"] = "Tumor"
+tempus_covars1 = read.delim("~/Desktop/Cancer/Burden/Tempus/covarsProteinTMB.txt", stringsAsFactors = F)
+colnames(tempus_covars1) = c("Cancer","Covariate",
+                             "Beta_TUMOR","Stderr_TUMOR","Zscore_TUMOR","Pvalue_TUMOR",
+                             "Beta_NORMAL","Stderr_NORMAL","Zscore_NORMAL","Pvalue_NORMAL",
+                             "Beta_MATCH","Stderr_MATCH","Zscore_MATCH","Pvalue_MATCH")
+tempus_covars1["Burden"] = "ProteinTMB"
+temp = read.delim("~/Desktop/Cancer/Burden/Tempus/covarsCNB.txt",stringsAsFactors = F)
+colnames(temp) = c("Cancer","Covariate",
+                             "Beta_TUMOR","Stderr_TUMOR","Zscore_TUMOR","Pvalue_TUMOR",
+                             "Beta_NORMAL","Stderr_NORMAL","Zscore_NORMAL","Pvalue_NORMAL",
+                             "Beta_MATCH","Stderr_MATCH","Zscore_MATCH","Pvalue_MATCH")
+
+temp["Burden"] = "DeepCNB"
+tempus_covars1 = rbind(tempus_covars1, temp)
+tempus_covars = as.data.frame(c(tempus_covars1$Cancer, tempus_covars1$Cancer))
+colnames(tempus_covars) = "Cancer"
+tempus_covars["Burden"] = c(tempus_covars1$Burden, tempus_covars1$Burden)
+tempus_covars["Covariate"] = c(tempus_covars1$Covariate, tempus_covars1$Covariate)
+tempus_covars["Beta"] = c(tempus_covars1$Beta_MATCH, tempus_covars1$Beta_NORMAL)
+tempus_covars["Stderr"] = c(tempus_covars1$Stderr_MATCH, tempus_covars1$Stderr_NORMAL)
+tempus_covars["Zscore"] = c(tempus_covars1$Zscore_MATCH, tempus_covars1$Zscore_NORMAL)
+tempus_covars["Pvalue"] = c(tempus_covars1$Pvalue_MATCH, tempus_covars1$Pvalue_NORMAL)
+tempus_covars["Source"] = "Tempus"
+tempus_covars["Sample"] = c(rep("Tumor",dim(tempus_covars1)[1]), rep("Normal",dim(tempus_covars1)[1]))
+# remove Non-Hodgkin's Lymphoma and RCC
+#tempus_covars = tempus_covars[-which(tempus_covars$Cancer %in% c("Non-Hodgkin_Lymphoma","Renal_Cell_Carcinoma","Leukemia")),]
+
+covars = rbind(profile_covars, tempus_covars)
+match_covars = covars[which(covars$Covariate=="Match" & covars$Source=="Tempus" & covars$Sample=="Tumor"),]
+match_covars$Beta = as.numeric(match_covars$Beta)
+match_covars$Stderr = as.numeric(match_covars$Stderr)
+match_covars[which(match_covars$Burden=="ProteinTMB"),"Burden"] = "TMB"
+match_covars[which(match_covars$Burden=="DeepCNB"),"Burden"] = "CNB"
+metaFE = match_covars[which(match_covars$Burden=="CNB"),]
+result = rma(yi = metaFE$Beta, sei = metaFE$Stderr, method = 'FE')
+metaFE = match_covars[which(match_covars$Burden=="TMB"),]
+result2 = rma(yi = metaFE$Beta, sei = metaFE$Stderr, method = 'FE')
+match_covars = rbind(match_covars, c("CNB", "Pan-Cancer", "Normal-Match", result$beta, result$se, result$zval, result$pval, "Tempus", "Tumor"))
+match_covars = rbind(match_covars, c("TMB", "Pan-Cancer", "Normal-Match", result2$beta, result2$se, result2$zval, result2$pval, "Tempus", "Tumor"))
+
+match_covars$Covariate = "Normal-Match"
+match_covars = subset(match_covars, select = -c(Stderr, Zscore))
+match_covars$Beta = as.numeric(match_covars$Beta)
+match_covars$Beta = round(match_covars$Beta, 3)
+match_covars$Pvalue = as.numeric(match_covars$Pvalue)
+match_covars$Pvalue = scientific(match_covars$Pvalue, 3)
+
+covars = covars[-which(covars$Covariate=="Match"),]
+covars = covars[-which(covars$Covariate=="Metastatic" & covars$Cancer=="Cancer_of_Unknown_Primary"),]
+covars$Beta = as.numeric(covars$Beta)
+covars$Stderr = as.numeric(covars$Stderr)
+temp = NULL
+for(outcome in c("DeepCNB","ProteinTMB")){
+  for(covar in unique(covars$Covariate)){
+    for(source in c("Profile","Tempus")){
+      metaFE = covars[which(covars$Burden == outcome & covars$Covariate == covar & covars$Source==source),]
+      if(source=="Tempus"){
+        for(sample in c("Tumor", "Normal")){
+          metaFE2 = metaFE[which(metaFE$Sample==sample),]
+          result = rma(yi = metaFE2$Beta, sei = metaFE2$Stderr, method = "FE")
+          temp = rbind(temp, c(outcome, "Pan-Cancer", covar, result$beta, result$se, result$zval, result$pval, source, sample))
+        }
+      } else {
+        result = rma(yi = metaFE$Beta, sei = metaFE$Stderr, method = "FE")
+        temp = rbind(temp, c(outcome, "Pan-Cancer", covar, result$beta, result$se, result$zval, result$pval, source, "Tumor"))
+      }
+    }
+  }
+}
+
+source="Profile"
+outcome="CNB"
+for(covar in unique(covars$Covariate)){
+  metaFE = covars[which(covars$Burden == outcome & covars$Covariate == covar & covars$Source==source),]
+  result = rma(yi = metaFE$Beta, sei = metaFE$Stderr, method = "FE")
+  temp = rbind(temp, c(outcome, "Pan-Cancer", covar, result$beta, result$se, result$zval, result$pval, source, "Tumor"))
+}
+
+temp = as.data.frame(temp)
+colnames(temp) = colnames(covars)
+covars = rbind(covars, temp)
+covars$Pvalue = as.numeric(covars$Pvalue)
+covars["Significant"] = ""
+covars[which(covars$Pvalue<0.05),"Significant"] = "*"
+rep_dim = NULL
+rep_cancer = NULL
+rep_covar = NULL
+rep_outcome = NULL
+
+for(i in unique(covars$Covariate)){
+  for(j in unique(covars$Burden)){
+    discov_dim = dim(covars[which(covars$Covariate == i & 
+                                  covars$Source == "Profile" &
+                                  covars$Burden == j & 
+                                  covars$Cancer != "Pan-Cancer"),])[1]
+    covars[which(covars$Covariate == i &
+                 covars$Source == "Profile" &
+                 covars$Burden == j &
+                 covars$Cancer != "Pan-Cancer" &
+                 covars$Pvalue < (0.05/discov_dim)), "Significant"] = "***"
+    if(j!="CNB"){
+      rep = covars[which(covars$Covariate == i &
+                 covars$Source == "Profile" &
+                 covars$Burden == j &
+                 covars$Cancer != "Pan-Cancer" &
+                 covars$Cancer != "Non-Hodgkin_Lymphoma" &
+                 covars$Cancer != "Renal_Cell_Carcinoma" &
+                 covars$Cancer != "Leukemia" &
+                 covars$Pvalue < (0.05/discov_dim)),]
+      rep_dim = c(rep_dim, rep(dim(rep)[1], dim(rep)[1]))
+      rep_cancer = c(rep_cancer, as.character(rep$Cancer))
+      rep_covar = c(rep_covar, rep$Covariate)
+      rep_outcome = c(rep_outcome, rep$Burden)
+    }
+  }
+}
+
+rep = as.data.frame(rep_dim)
+colnames(rep) = "Dimensions"
+rep["Cancer"] = rep_cancer
+rep["Covariate"] = rep_covar
+rep["Burden"] = rep_outcome
+
+for(i in 1:dim(rep)[1]){
+  this = rep[i,]
+  covars[which(covars$Burden==this$Burden & covars$Cancer==this$Cancer & covars$Covariate==this$Covariate & covars$Source=="Tempus" & covars$Pvalue<0.05),"Significant"] = "*"
+  covars[which(covars$Burden==this$Burden & covars$Cancer==this$Cancer & covars$Covariate==this$Covariate & covars$Source=="Tempus" & covars$Pvalue<(0.05/this$Dimensions)),"Significant"] = "***"
+}
+covars[which(covars$Cancer=="Pan-Cancer" & covars$Pvalue<0.05), "Significant"] = "**"
+
+demographics = covars[which(covars$Covariate %in% c("Sex","Age")),]
+metastatic = covars[which(covars$Covariate=="Metastatic"),]
+
+demographics$Beta = as.numeric(demographics$Beta)
+demographics$Stderr = as.numeric(demographics$Stderr)
+demographics$Pvalue = as.numeric(demographics$Pvalue)
+demographics["CI_Upper"] = demographics$Beta + demographics$Stderr * qnorm(0.975)
+demographics["CI_Lower"] = demographics$Beta - demographics$Stderr * qnorm(0.975)
+
+metastatic$Beta = as.numeric(metastatic$Beta)
+metastatic$Stderr = as.numeric(metastatic$Stderr)
+metastatic$Pvalue = as.numeric(metastatic$Pvalue)
+metastatic["CI_Upper"] = metastatic$Beta + metastatic$Stderr * qnorm(0.975)
+metastatic["CI_Lower"] = metastatic$Beta - metastatic$Stderr * qnorm(0.975)
+
+demographics$Cancer = str_replace_all(demographics$Cancer, "_", " ")
+demographics$Cancer = factor(demographics$Cancer,levels = the_cancer)
+
+metastatic$Cancer = str_replace_all(metastatic$Cancer, "_", " ")
+metastatic$Cancer = factor(metastatic$Cancer,levels = the_cancer)
+
+covars$Beta = as.numeric(covars$Beta)
+covars$Beta = round(covars$Beta, 3)
+covars$Stderr = as.numeric(covars$Stderr)
+covars$Stderr = round(covars$Stderr, 3)
+covars$Pvalue = as.numeric(covars$Pvalue)
+covars$Pvalue = scientific(covars$Pvalue, 3)
+covars$Cancer = str_replace_all(covars$Cancer, "_", " ")
+covars$Cancer = factor(covars$Cancer,levels = the_cancer)
+covars[which(covars$Burden=="ProteinTMB"),"Burden"] = "TMB"
+covars[which(covars$Burden=="CNB"),"Burden"] = "All CNB"
+covars[which(covars$Burden=="DeepCNB"),"Burden"] = "CNB"
+
+covars2 = subset(covars, select = -c(Stderr, Zscore, Significant))
+covars2 = rbind(covars2, match_covars)
+covars2 = subset(covars2, select = c(Source, Sample, Cancer, Burden, Covariate, Beta, Pvalue))
+covars2 = covars2[with(covars2, order(Source, Sample, Burden, Covariate)),]
+profile = covars2[which(covars2$Source=="Profile"),]
+profile = subset(profile, select = c(Cancer, Burden, Covariate, Beta, Pvalue))
+colnames(profile) = c("Cancer","Burden", "Covariate", "Beta_Profile", "Pvalue_Profile")
+tempus_tumor = covars2[which(covars2$Source=="Tempus" & covars2$Sample=="Tumor"),]
+tempus_tumor = subset(tempus_tumor, select = c(Cancer, Burden, Covariate, Beta, Pvalue))
+colnames(tempus_tumor) = c("Cancer","Burden", "Covariate", "Beta_Tempus_tumor", "Pvalue_Tempus_tumor")
+tempus_normal = covars2[which(covars2$Source=="Tempus" & covars2$Sample=="Normal"),]
+tempus_normal = subset(tempus_normal, select = c(Cancer, Burden, Covariate, Beta, Pvalue))
+colnames(tempus_normal) = c("Cancer","Burden", "Covariate", "Beta_Tempus_normal", "Pvalue_Tempus_normal")
+covars2 = merge(profile, tempus_tumor, by = c("Cancer", "Burden", "Covariate"), all = T)
+covars2 = merge(covars2, tempus_normal, by = c("Cancer", "Burden", "Covariate"), all = T)
+write.table(covars2, "~/Desktop/Cancer/Burden/Paper/Tables/final_allclinical.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+
+covars2 = covars[which(covars$Covariate %in% c("Sex", "Age", "Metastatic")),]
+covars2 = subset(covars2, select = c(Cancer, Burden, Covariate, Beta, Pvalue, Significant, Source, Sample))
+profile = covars2[which(covars2$Source=="Profile"),]
+colnames(profile) = c("Cancer", "Burden", "Clinical Feature", "Beta_Profile", "Pvalue_Profile", "Signif_Profile", "Source", "Sample")
+tempus_normal = covars2[which(covars2$Source=="Tempus" & covars2$Sample=="Normal"),]
+colnames(tempus_normal) = c("Cancer", "Burden", "Clinical Feature", "Beta_Normal", "Pvalue_Normal", "Signif_Normal", "Source", "Sample")
+tempus_tumor = covars2[which(covars2$Source=="Tempus" & covars2$Sample=="Tumor"),]
+colnames(tempus_tumor) = c("Cancer", "Burden", "Clinical Feature", "Beta_Tumor", "Pvalue_Tumor", "Signif_Tumor", "Source", "Sample")
+covars2 = merge(profile, tempus_tumor, by = c("Cancer", "Burden", "Clinical Feature"), all = T)
+covars2 = merge(covars2, tempus_normal, by = c("Cancer", "Burden", "Clinical Feature"), all = T)
+covars2 = subset(covars2, select = c(Cancer, Burden, `Clinical Feature`, Beta_Profile, Pvalue_Profile, Signif_Profile,
+                                     Beta_Tumor, Pvalue_Tumor, Signif_Tumor,
+                                     Beta_Normal, Pvalue_Normal, Signif_Normal))
+
+covars2 = covars2[which(covars2$Signif_Profile %in% c("**","***")),]
+write.table(covars2, "~/Desktop/Cancer/Burden/Paper/Tables/final_sigclinical.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+
+demographics$Pvalue = scientific(demographics$Pvalue, 3)
+metastatic$Pvalue = scientific(metastatic$Pvalue, 3)
+
+rm(covars2, match_covars, metaFE, metaFE2, rep, result, temp, tempus_covars, tempus_covars1, this, covar, discov_dim, i, j, outcome, rep_cancer, rep_covar, rep_dim, rep_outcome, sample, source, result2, name)
+```
+
+```{r covar_fig, echo = F}
+# Supplementary Figure
+tmb_sex = ggplot(demographics[which(demographics$Covariate=="Sex" & demographics$Burden=="ProteinTMB"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("TMB") + geom_point(data=subset(demographics[which(demographics$Covariate=="Sex" &
+                                          demographics$Burden=="ProteinTMB"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title.x = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0) + ylab("Sex\n")
+
+cnb_sex = ggplot(demographics[which(demographics$Covariate=="Sex" & demographics$Burden=="DeepCNB"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("CNB") + geom_point(data=subset(demographics[which(demographics$Covariate=="Sex" &
+                                          demographics$Burden=="DeepCNB"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title = element_blank(), axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+cnball_sex = ggplot(demographics[which(demographics$Covariate=="Sex" & demographics$Burden=="CNB"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("All CNB") + geom_point(data=subset(demographics[which(demographics$Covariate=="Sex" &
+                                          demographics$Burden=="CNB"),], Source=="Profile")) +
+  guides(colour = F, size = F) +
+  theme(axis.title = element_blank(), axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+tmb_age = ggplot(demographics[which(demographics$Covariate=="Age" & demographics$Burden=="ProteinTMB"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  geom_point(data=subset(demographics[which(demographics$Covariate=="Age" &
+                                          demographics$Burden=="ProteinTMB"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title.x = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0) + ylab("Age\n")
+
+cnb_age = ggplot(demographics[which(demographics$Covariate=="Age" & demographics$Burden=="DeepCNB"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  geom_point(data=subset(demographics[which(demographics$Covariate=="Age" &
+                                          demographics$Burden=="DeepCNB"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title = element_blank(), axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+cnball_age = ggplot(demographics[which(demographics$Covariate=="Age" & demographics$Burden=="CNB"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  geom_point(data=subset(demographics[which(demographics$Covariate=="Age" &
+                                          demographics$Burden=="CNB"),], Source=="Profile")) +
+  guides(colour = F, size = F) +
+  theme(axis.title = element_blank(), axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+tmb_met = ggplot(metastatic[which(metastatic$Covariate=="Metastatic" & metastatic$Burden=="ProteinTMB"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  geom_point(data=subset(metastatic[which(metastatic$Covariate=="Metastatic" &
+                                          metastatic$Burden=="ProteinTMB"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0) + ylab("Metastatic Status\n")
+
+cnb_met = ggplot(metastatic[which(metastatic$Covariate=="Metastatic" & metastatic$Burden=="DeepCNB"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  geom_point(data=subset(metastatic[which(metastatic$Covariate=="Metastatic" &
+                                          metastatic$Burden=="DeepCNB"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+cnball_met = ggplot(metastatic[which(metastatic$Covariate=="Metastatic" & metastatic$Burden=="CNB"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  geom_point(data=subset(metastatic[which(metastatic$Covariate=="Metastatic" &
+                                          metastatic$Burden=="CNB"),], Source=="Profile")) +
+  guides(colour = F, size = F) +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+#Potentially drop tags if not referencing by name
+supp_covar_plot = wrap_plots(tmb_sex + theme(plot.margin = unit(c(0,10,10,0), "pt"), 
+                                     axis.title.y = element_text(face="bold"), 
+                                     plot.title = element_text(face="bold"), 
+                                     plot.tag.position = c(0,1), 
+                                     plot.tag = element_text(hjust = -21)), 
+                  cnb_sex + theme(plot.margin = unit(c(0,10,10,10), "pt"), 
+                                   plot.title = element_text(face="bold")),
+                  cnball_sex + theme(plot.margin = unit(c(0,0,10,10), "pt"), 
+                                      plot.title = element_text(face="bold")),
+                  tmb_age + theme(plot.margin = unit(c(0,10,10,0), "pt"), 
+                                    axis.title.y = element_text(face="bold"),
+                                    plot.tag.position = c(0,1), 
+                                    plot.tag = element_text(hjust = -19)),
+                  cnb_age + theme(plot.margin = unit(c(0,10,10,10), "pt")), 
+                  cnball_age + theme(plot.margin = unit(c(0,0,10,10), "pt")),
+                  tmb_met + theme(plot.margin = unit(c(0,10,0,0), "pt"), 
+                                    axis.title.y = element_text(face="bold"),
+                                    plot.tag.position = c(0,1), 
+                                    plot.tag = element_text(hjust = -18)),
+                  cnb_met + theme(plot.margin = unit(c(0,10,0,10), "pt")),
+                  cnball_met + theme(plot.margin = unit(c(0,0,0,10), "pt")),
+    widths = c(2,2,1), guides='collect', tag_level = 'new') &  theme(legend.position='bottom') 
+
+supp_covar_plot = supp_covar_plot + plot_annotation(tag_levels = 'A')
+
+tmb_age_main = ggplot(demographics[which(demographics$Covariate=="Age" & 
+                                         demographics$Burden=="ProteinTMB" & demographics$Sample=="Tumor"),],
+          aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Source, label = Significant)) + 
+          all_theme + geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", 
+                                                                            linetype="dashed", alpha=.5) +
+          geom_errorbarh(position = position_dodge(0.5), height=0.0) + ggtitle("Age-TMB") +
+          guides(colour = guide_legend(override.aes = list(size=1))) +
+          theme(axis.title = element_blank(), legend.position = "bottom") + 
+          scale_color_manual(values = c("#616161","#D39200")) + scale_y_discrete(limits=rev) + 
+          geom_text(position = position_dodge(0.25), size = 10, hjust = 0, show_guide = F) 
+  
+tmb_age_bin = ggbarplot(glm_details[which(glm_details$Category=="Age5" 
+                                             & glm_details$Cancer=="Pan-Cancer"),], 
+          x="Variable", y = "Prop", fill = "Variable", facet.by = "Source") + xlab("Age Quintiles") + 
+          ylab("TMB-H Proportion") + ylim(0, 0.35) + labs(fill = "Age") + ggtitle("Proportion with High TMB") + 
+          all_theme + all_theme + guides(color = F, size = F, fill = F) +
+          geom_errorbar(data=glm_details[which(glm_details$Category=="Age5" 
+                                             & glm_details$Cancer=="Pan-Cancer"),], 
+                        aes(x=Variable, ymin = Prop - SE, ymax = Prop + SE), width = 0.5) + 
+          geom_signif(stat='identity', inherit.aes = F, data=sigBinary[which(sigBinary$Category=="Age5"),], 
+                        aes(x = group1, xend=group2, y = c(0.21,0.33,0.17), yend = c(0.21,0.33,0.17), 
+                        annotation = Label, textsize=4), manual =T)
+
+tmb_sex_bin = ggbarplot(glm_details[which(glm_details$Category=="Sex" 
+                                             & glm_details$Cancer=="Pan-Cancer"),],
+          x="Variable", y = "Prop", fill = "Variable", facet.by = "Source") + scale_x_discrete(limits=c("Male","Female")) +
+          xlab("Sex") + ylab("TMB-H Proportion") + labs(fill = "Sex") + all_theme + guides(color = F, size = F, fill = F) +
+          ylim(0.0, 0.35) + geom_errorbar(data=glm_details[which(glm_details$Category=="Sex" 
+                                              & glm_details$Cancer=="Pan-Cancer"),], 
+                        aes(x=Variable, ymin = Prop - SE, ymax = Prop + SE), width = 0.5) + 
+          scale_fill_manual(values = c("#F8766D","#00BFC4")) + geom_signif(stat='identity', inherit.aes = F,
+                        data=sigBinary[which(sigBinary$Category=="Sex"),], 
+                        aes(x = group1, xend=group2, y = c(0.16, 0.31), yend = c(0.16, 0.31), annotation = Label, textsize=4), manual =T)
+
+tmb_met_bin = ggbarplot(glm_details[which(glm_details$Category=="Met" 
+                                             & glm_details$Cancer=="Pan-Cancer"),], 
+                        x="Variable", y = "Prop", fill = "Variable", facet.by = "Source") + 
+          scale_fill_manual(values = c("#00BFC4", "#F8766D")) + xlab("Metastatic Status") + 
+          scale_x_discrete(limits = c("Primary", "Metastatic")) +
+          ylim(0.0, 0.33) + labs(fill = "Metastatic Status") + all_theme + guides(color = F, size = F, fill = F) +
+          geom_errorbar(data=glm_details[which(glm_details$Category=="Met" 
+                                             & glm_details$Cancer=="Pan-Cancer"),], 
+          aes(x=Variable, ymin = Prop - SE, ymax = Prop + SE), width = 0.5) + geom_signif(stat='identity', inherit.aes = F,
+          data=sigBinary[which(sigBinary$Category=="Met"),], aes(x = group1, xend=group2, y = c(0.13), 
+          yend = c(0.13), annotation = Label, textsize=4), manual =T) + theme(axis.title.y = element_blank())
+
+main_covar_plot = ((tmb_age_main | (tmb_age_bin/(tmb_sex_bin + tmb_met_bin))) + plot_layout(heights = c(10,7))) + plot_annotation(tag_levels = 'A') + plot_layout(widths = c(8,10))
+
+rm(cnb_age, cnb_sex, cnb_met, cnball_age, cnball_sex, cnball_met, tmb_age, tmb_sex, tmb_met,
+   profile_covars, main_table_profile, main_table_tempus, demographics, metastatic, tmb_age_main, 
+   tmb_met_bin, tmb_age_bin, tmb_sex_bin, main_table, cnball_table)
+```
+
+```{r pc_pruning, echo = F}
+co_pc1 <- read.delim("~/Desktop/Cancer/Burden/Profile/INPUT/CO.S1.PC1.total")
+colnames(co_pc1) <- c("FID1","PATIENT","NMISS_ALLELE_CT1","NAMED_ALLELE_DOSAGE_SUM1","PC1")
+
+co_pc2 <- read.delim("~/Desktop/Cancer/Burden/Profile/INPUT/CO.S1.PC2.total")
+colnames(co_pc2) <- c("FID2","PATIENT","NMISS_ALLELE_CT2","NAMED_ALLELE_DOSAGE_SUM2","PC2")
+
+pcs <- merge(co_pc1,co_pc2, by = "PATIENT")
+pcs <- subset(pcs, select = c("PATIENT","PC1","PC2"))
+
+cbio <- read.delim("~/Desktop/Cancer/Burden/Profile/INPUT/CBIO_DEMOGRAPHICS.tab", stringsAsFactors = F)
+cbio = subset(cbio, select = c("CBIO_PATIENT", "HISPANIC_IND", "RACE_WHITE_IND", "RACE_BLACK_IND", "RACE_ASIAN_IND"))
+colnames(cbio) = c("PATIENT", "Hispanic", "White", "Black", "Asian")
+pcs <- merge(pcs, cbio, all.x = TRUE, by = "PATIENT")
+
+std1 <- 2*sqrt(var(pcs[which(pcs$White=='Y'),"PC1"]))
+std2 <- 2*sqrt(var(pcs[which(pcs$White=='Y'),"PC2"]))
+mean1 <- mean(pcs[which(pcs$White=='Y'),"PC1"])
+mean2 <- mean(pcs[which(pcs$White=='Y'),"PC2"])
+
+pcs[which(is.na(pcs$White)),"White"] = "Unknown"
+pcs["Race"] = "Unknown"
+pcs["Alpha"] = 0.2
+pcs[which(pcs$Black=="Y"),"Race"] = "Black"
+pcs[which(pcs$Black=="Y"),"Alpha"] = 1
+pcs[which(pcs$Asian=="Y"),"Race"] = "Asian"
+pcs[which(pcs$Asian=="Y"),"Alpha"] = 1
+pcs[which(pcs$Hispanic=="Y"),"Race"] = "Hispanic"
+pcs[which(pcs$Hispanic=="Y"),"Alpha"] = 1
+pcs[which(pcs$White=="Y"),"Race"] = "White"
+pcs[which(pcs$White=="Y"),"Alpha"] = 0.2
+
+pcsWhite = ggplot(pcs, aes(x=PC1, y=PC2, color = Race)) + geom_point(alpha = pcs$Alpha) + theme_bw() + xlab("Projected PC 1") + ylab("Projected PC 2") + geom_rect(aes(ymin = mean2-std2, ymax = mean2+std2, xmin = mean1-std1, xmax = mean1+std1), color = "black", fill = NA) + scale_color_manual(values=c("#E64B35FF","#4DBBD5FF","#00A087FF","#3C5488FF","#F39B7FFF"), labels = c("Asian","Black", "Hispanic", "Unknown", "White")) + guides(color = FALSE, size = FALSE)
+
+coPCs_legend = g_legend(ggplot(pcs, aes(x=PC1, y=PC2, color = Race)) + geom_point(alpha = pcs$Alpha) + theme_bw() + xlab("Projected PC 1") + ylab("Projected PC 2") + geom_rect(aes(ymin = mean2-std2, ymax = mean2+std2, xmin = mean1-std1, xmax = mean1+std1), color = "black", fill = NA) + scale_color_manual(values=c("#E64B35FF","#4DBBD5FF","#00A087FF","#3C5488FF","#F39B7FFF"), labels = c("Asian","Black", "Hispanic", "Unknown", "White")) + theme(legend.key.height = unit(3, 'cm'), legend.key.width = unit(1, 'cm'), legend.title = element_text(size=18), legend.text = element_text(size=18)) + guides(colour = guide_legend(override.aes = list(size=6))))
+
+pcsSubset = pcs[which(pcs$PC1 >= (mean1-std1) & pcs$PC1 <= (mean1+std1) & pcs$PC2 >= (mean2-std2) & pcs$PC2 <= (mean2+std2)),]
+
+pcsRace = ggplot(pcsSubset, aes(x=PC1, y=PC2, color = Race)) + geom_point(alpha = pcsSubset$Alpha) + theme_bw() + xlab("Projected PC 1") + ylab("Projected PC 2") + scale_color_manual(values=c("#E64B35FF","#00A087FF","#3C5488FF","#F39B7FFF"), labels = c("Asian", "Hispanic", "Unknown", "White")) + guides(color = FALSE, size = FALSE)
+
+bothcohorts$Cancer = str_replace_all(bothcohorts$Cancer, "_", "\n")
+bothcohorts[which(bothcohorts$Cancer=="Soft\nTissue\nSarcoma"),"Cancer"] = "Soft Tissue\nSarcoma"
+bothcohorts[which(bothcohorts$Cancer=="Cancer\nof\nUnknown\nPrimary"),"Cancer"] = "Cancer of\nUnknown Primary"
+bothcohorts[which(bothcohorts$Cancer=="Non-Small\nCell\nLung\nCancer"),"Cancer"] = "Non-Small Cell\nLung Cancer"
+bothcohorts[which(bothcohorts$Cancer=="Head\nand\nNeck\nCarcinoma"),"Cancer"] = "Head and Neck\nCarcinoma"
+bothcohorts[which(bothcohorts$Cancer=="Renal\nCell\nCarcinoma"),"Cancer"] = "Renal Cell\nCarcinoma"
+bothcohorts$Cancer = factor(bothcohorts$Cancer,levels = ordered_cancers)
+
+tmb_all = ggplot(bothcohorts, aes(x=Cancer, y = TMB, fill = Source)) + geom_violin() + all_theme + ylab("Count") + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + ggtitle("TMB Distribution")
+
+tmb_zoom = ggplot(bothcohorts[which(bothcohorts$TMB<25),], aes(x=Cancer, y = TMB, fill = Source)) + geom_violin() + all_theme + ylab("Count")
+
+tmb_dist = wrap_plots((tmb_all/tmb_zoom), guides='collect', tag_level = 'new')
+
+cnb_all = ggplot(bothcohorts, aes(x=Cancer, y = CNB, fill = Source)) + geom_violin() + all_theme + ylab("Count") + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + ggtitle("CNB Distribution")
+
+cnb_zoom = ggplot(bothcohorts[which(bothcohorts$CNB<5),], aes(x=Cancer, y = CNB, fill = Source)) + geom_violin() + all_theme + ylab("Count")
+
+cnb_dist = wrap_plots((cnb_all/cnb_zoom), guides='collect', tag_level = 'new')
+
+cnball_all = ggplot(bothcohorts, aes(x=Cancer, y = CNB_All, fill = Source)) + geom_violin() + all_theme + ylab("Count") + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + ggtitle("All CNB Distribution")
+
+cnball_zoom = ggplot(bothcohorts[which(bothcohorts$CNB_All<20),], aes(x=Cancer, y = CNB_All, fill = Source)) + geom_violin() + all_theme + ylab("Count")
+
+cnball_dist = wrap_plots((cnball_all/cnball_zoom), guides='collect', tag_level = 'new')
+
+co_pcs = pcs
+rm(cbio, co_pc1, co_pc2, coPCs_legend, pcs, pcsRace, pcsSubset, pcsWhite)
+```
+
+```{r ancestry, echo = F}
+demographics <- read.csv("~/Desktop/Cancer/Burden/Profile/INPUT/demographics.csv", stringsAsFactors = F)
+colnames(demographics)[1] = "SAMPLE_ID"
+colnames(demographics)[3] = "RELIGION"
+demographics["College"] = NA
+demographics[which(demographics$EDUCATION_LEVEL_NM %in% c("8TH GRADE OR LESS", "SOME HIGH SCHOOL", "OBTAINED GED", 
+                      "GRADUATED - HIGH SCHOOL", "SOME TECHNICAL PROGRAM", "SOME VOCATIONAL PROGRAM", "SOME COLLEGE")),"College"] = 0
+demographics[which(demographics$EDUCATION_LEVEL_NM %in% c("GRADUATED - COLLEGE", "GRADUATED - GRAD SCHOOL", "GRADUATED - POST GRADUATE")),"College"] = 1
+demographics$SAMPLE_ID = paste(demographics$SAMPLE_ID,"S1", sep = "_")
+demographics["Jewish Religion"] = "No"
+demographics[which(demographics$RELIGION=="JEWISH"),"Jewish Religion"] = "Yes"
+demographics[which(demographics$RELIGION %in% c("UNAVAILABLE","DECLINED","UNKNOWN - OTHER", "UNKNOWN - NOT SPECIFIED")),"Jewish Religion"] = "Unknown"
+demographics[which(demographics$RELIGION %in% c("UNAVAILABLE","DECLINED","UNKNOWN - OTHER", "UNKNOWN - NOT SPECIFIED")),"RELIGION"] = "Unknown"
+demographics = subset(demographics, select = c("SAMPLE_ID","Jewish Religion", "College")) #, "Catholic #Religion", "RELIGION"))
+
+outcomes = merge(outcomes, demographics, by = "SAMPLE_ID", all.x = T)
+outcomes[which(is.na(outcomes$`Jewish Religion`)),"Jewish Religion"] = "Unknown"
+rm(demographics)
+outcomes$`Jewish Religion` = factor(outcomes$`Jewish Religion`, levels = c("Yes", "No", "Unknown"))
+
+outcomes["TMB-H"] = 0
+outcomes[which(outcomes$OrigMSSTMB>=10),"TMB-H"] = 1
+#Do not do NSCLC college results HERE!!!
+college = subset(outcomes, select = c("SAMPLE_ID", "Cancer", "MSSProteinTMB", "TMB-H", "College", "EduYears_Pan", 
+                                      "AGE", "SEX", "Metastatic", "PANEL_VERSION", "TUMOR_PURITY", 
+                                      "PC1", "PC2", "PC3", "PC4", "PC5"))
+colnames(college) = c("SAMPLE_ID", "Cancer", "TMB", "TMBH", "College", "EAPRS_Pan",
+                      "Age", "Sex", "Metastatic", "Panel_Version", "Tumor_Purity", 
+                      "PC1", "PC2", "PC3", "PC4", "PC5")
+college$Sex = factor(college$Sex, levels = c("0","1"), labels = c("Male", "Female"))
+college$Metastatic = factor(college$Metastatic, levels = c(0,1), labels = c("Primary", "Metastatic"))
+college$Panel_Version = factor(college$Panel_Version, levels = c(1,2,3))
+college$College = factor(college$College, levels = c(0,1))
+
+directCollegeEffect = NULL
+prsCollegeEffect = NULL
+for(cancer in all_cancer){
+  temp = college[which(college$Cancer==cancer),]
+  if(cancer %in% c("Breast_Carcinoma", "Endometrial_Cancer", "Ovarian_Cancer", "Prostate_Cancer")){
+    z = summary(lm(data=temp, TMB ~ College + Age + Metastatic + Panel_Version + Tumor_Purity + PC1 + PC2 + PC3 + PC4 + PC5))$coef[1:2,c(1,2,4)]
+    directCollegeEffect = rbind(directCollegeEffect, cbind(cancer, "TMB", rownames(z), z))
+    z2 = summary(glm(data=temp, TMBH ~ College + Age + Metastatic + Panel_Version + Tumor_Purity + PC1 + PC2 + PC3 + PC4 + PC5, family = binomial(link = "logit")))$coef[1:2,c(1,2,4)]
+    directCollegeEffect = rbind(directCollegeEffect, cbind(cancer, "TMBH", rownames(z2), z2))
+    
+    z = summary(lm(data=temp, TMB ~ College + EAPRS_Pan + Age + Metastatic + Panel_Version + Tumor_Purity + PC1 + PC2 + PC3 + PC4 + PC5))$coef[1:3,c(1,2,4)]
+    prsCollegeEffect = rbind(prsCollegeEffect, cbind(cancer, "TMB", rownames(z), z))
+    z2 = summary(glm(data=temp, TMBH ~ College + EAPRS_Pan + Age + Metastatic + Panel_Version + Tumor_Purity + PC1 + PC2 + PC3 + PC4 + PC5, family = binomial(link = "logit")))$coef[1:3,c(1,2,4)]
+    prsCollegeEffect = rbind(prsCollegeEffect, cbind(cancer, "TMBH", rownames(z2), z2))
+    
+  } else {
+    z = summary(lm(data=temp, TMB ~ College + Age + Sex + Metastatic + Panel_Version + Tumor_Purity + PC1 + PC2 + PC3 + PC4 + PC5))$coef[1:2,c(1,2,4)]
+    directCollegeEffect = rbind(directCollegeEffect, cbind(cancer, "TMB", rownames(z), z))
+    z2 = summary(glm(data=temp, TMBH ~ College + Age + Sex + Metastatic + Panel_Version + Tumor_Purity + PC1 + PC2 + PC3 + PC4 + PC5, family = binomial(link = "logit")))$coef[1:2,c(1,2,4)]
+    directCollegeEffect = rbind(directCollegeEffect, cbind(cancer, "TMBH", rownames(z2), z2))
+    
+    z = summary(lm(data=temp, TMB ~ College + EAPRS_Pan + Age + Sex + Metastatic + Panel_Version + Tumor_Purity + PC1 + PC2 + PC3 + PC4 + PC5))$coef[1:3,c(1,2,4)]
+    prsCollegeEffect = rbind(prsCollegeEffect, cbind(cancer, "TMB", rownames(z), z))
+    z2 = summary(glm(data=temp, TMBH ~ College + EAPRS_Pan + Age + Sex + Metastatic + Panel_Version + Tumor_Purity + PC1 + PC2 + PC3 + PC4 + PC5, family = binomial(link = "logit")))$coef[1:3,c(1,2,4)]
+    prsCollegeEffect = rbind(prsCollegeEffect, cbind(cancer, "TMBH", rownames(z2), z2))
+  }
+}
+
+directCollegeEffect = data.frame(directCollegeEffect)
+colnames(directCollegeEffect) = c("Cancer", "Burden", "IndVar", "Beta", "SE", "Pvalue")
+directCollegeEffect$Pvalue = as.numeric(directCollegeEffect$Pvalue)
+directCollegeEffect$Beta = as.numeric(directCollegeEffect$Beta)
+directCollegeEffect$SE = as.numeric(directCollegeEffect$SE)
+directCollegeEffect[which(directCollegeEffect$Cancer %in% c("Prostate_Cancer", "Leukemia") & directCollegeEffect$Burden=="TMBH"),4:6] = NA
+
+z = rma(yi = directCollegeEffect[which(directCollegeEffect$Burden=="TMB" & directCollegeEffect$IndVar=="College1"),"Beta"], sei = directCollegeEffect[which(directCollegeEffect$Burden=="TMB" & directCollegeEffect$IndVar=="College1"),"SE"], method = 'FE')
+z2 = rma(yi = directCollegeEffect[which(directCollegeEffect$Burden=="TMBH" & directCollegeEffect$IndVar=="College1"),"Beta"], sei = directCollegeEffect[which(directCollegeEffect$Burden=="TMBH" & directCollegeEffect$IndVar=="College1"),"SE"], method = 'FE')
+z3 = rma(yi = directCollegeEffect[which(directCollegeEffect$Burden=="TMB" & directCollegeEffect$IndVar=="(Intercept)"),"Beta"], sei = directCollegeEffect[which(directCollegeEffect$Burden=="TMB" & directCollegeEffect$IndVar=="(Intercept)"),"SE"], method = 'FE')
+z4 = rma(yi = directCollegeEffect[which(directCollegeEffect$Burden=="TMBH" & directCollegeEffect$IndVar=="(Intercept)"),"Beta"], sei = directCollegeEffect[which(directCollegeEffect$Burden=="TMBH" & directCollegeEffect$IndVar=="(Intercept)"),"SE"], method = 'FE')
+
+directCollegeEffect = rbind(directCollegeEffect, c("Pan-Cancer","TMB", "College1", z$beta, z$se, z$pval))
+directCollegeEffect = rbind(directCollegeEffect, c("Pan-Cancer","TMBH", "College1", z2$beta, z2$se, z2$pval))
+directCollegeEffect = rbind(directCollegeEffect, c("Pan-Cancer","TMB", "(Intercept)", z3$beta, z3$se, z3$pval))
+directCollegeEffect = rbind(directCollegeEffect, c("Pan-Cancer","TMBH", "(Intercept)", z4$beta, z4$se, z4$pval))
+
+directCollegeEffect$Pvalue = as.numeric(directCollegeEffect$Pvalue)
+directCollegeEffect$Beta = as.numeric(directCollegeEffect$Beta)
+directCollegeEffect$SE = as.numeric(directCollegeEffect$SE)
+directCollegeEffect["OR"] = exp(directCollegeEffect$Beta)
+directCollegeEffect = directCollegeEffect[which(!is.na(directCollegeEffect$Beta)),]
+directCollegeEffect["signif"] = ""
+directCollegeEffect[which(directCollegeEffect$Pvalue<0.05), "signif"] = "*"
+directCollegeEffect[which(directCollegeEffect$Pvalue<0.05/17 & directCollegeEffect$Burden=="TMB"), "signif"] = "***"
+directCollegeEffect[which(directCollegeEffect$Pvalue<0.05/15 & directCollegeEffect$Burden=="TMBH"), "signif"] = "***"
+directCollegeEffect[which(directCollegeEffect$Pvalue<0.05 & directCollegeEffect$Cancer=="Pan-Cancer"), "signif"] = "**"
+
+
+prsCollegeEffect = data.frame(prsCollegeEffect)
+colnames(prsCollegeEffect) = c("Cancer", "Burden", "IndVar", "Beta", "SE", "Pvalue")
+prsCollegeEffect$Pvalue = as.numeric(prsCollegeEffect$Pvalue)
+prsCollegeEffect$Beta = as.numeric(prsCollegeEffect$Beta)
+prsCollegeEffect$SE = as.numeric(prsCollegeEffect$SE)
+prsCollegeEffect[which(prsCollegeEffect$Cancer %in% c("Prostate_Cancer", "Leukemia") & prsCollegeEffect$Burden=="TMBH"),3:5] = NA
+
+z = rma(yi = prsCollegeEffect[which(prsCollegeEffect$Burden=="TMB" & prsCollegeEffect$IndVar=="College1"),"Beta"], sei = prsCollegeEffect[which(prsCollegeEffect$Burden=="TMB" & prsCollegeEffect$IndVar=="College1"),"SE"], method = 'FE')
+z2 = rma(yi = prsCollegeEffect[which(prsCollegeEffect$Burden=="TMBH" & prsCollegeEffect$IndVar=="College1"),"Beta"], sei = prsCollegeEffect[which(prsCollegeEffect$Burden=="TMBH" & prsCollegeEffect$IndVar=="College1"),"SE"], method = 'FE')
+z3 = rma(yi = prsCollegeEffect[which(prsCollegeEffect$Burden=="TMB" & prsCollegeEffect$IndVar=="EAPRS_Pan"),"Beta"], sei = prsCollegeEffect[which(prsCollegeEffect$Burden=="TMB" & prsCollegeEffect$IndVar=="EAPRS_Pan"),"SE"], method = 'FE')
+z4 = rma(yi = prsCollegeEffect[which(prsCollegeEffect$Burden=="TMBH" & prsCollegeEffect$IndVar=="EAPRS_Pan"),"Beta"], sei = prsCollegeEffect[which(prsCollegeEffect$Burden=="TMBH" & prsCollegeEffect$IndVar=="EAPRS_Pan"),"SE"], method = 'FE')
+
+prsCollegeEffect = rbind(prsCollegeEffect, c("Pan-Cancer","TMB", "College1", z$beta, z$se, z$pval))
+prsCollegeEffect = rbind(prsCollegeEffect, c("Pan-Cancer","TMBH", "College1", z2$beta, z2$se, z2$pval))
+prsCollegeEffect = rbind(prsCollegeEffect, c("Pan-Cancer","TMB", "EAPRS_Pan", z3$beta, z3$se, z3$pval))
+prsCollegeEffect = rbind(prsCollegeEffect, c("Pan-Cancer","TMBH", "EAPRS_Pan", z4$beta, z4$se, z4$pval))
+
+prsCollegeEffect$Pvalue = as.numeric(prsCollegeEffect$Pvalue)
+prsCollegeEffect$Beta = as.numeric(prsCollegeEffect$Beta)
+prsCollegeEffect$SE = as.numeric(prsCollegeEffect$SE)
+prsCollegeEffect["OR"] = exp(prsCollegeEffect$Beta)
+prsCollegeEffect = prsCollegeEffect[which(!is.na(prsCollegeEffect$Beta)),]
+prsCollegeEffect["signif"] = ""
+prsCollegeEffect[which(prsCollegeEffect$Pvalue<0.05), "signif"] = "*"
+prsCollegeEffect[which(prsCollegeEffect$Pvalue<0.05/17 & prsCollegeEffect$Burden=="TMB"), "signif"] = "***"
+prsCollegeEffect[which(prsCollegeEffect$Pvalue<0.05/15 & prsCollegeEffect$Burden=="TMBH"), "signif"] = "***"
+prsCollegeEffect[which(prsCollegeEffect$Pvalue<0.05 & prsCollegeEffect$Cancer=="Pan-Cancer"), "signif"] = "**"
+
+```
+
+```{r}
+#FIX!!!
+fig_outcomes=outcomes #In case I want to change it
+projected_eur_pcs = ggplot(fig_outcomes, aes(ProjectedPC1, ProjectedPC2, color = `Jewish Religion`)) + geom_point(alpha = 0.8) + 
+                  xlab("NW - SE Cline") + ylab("AJ - non-AJ Cline") + ggtitle("Profile") + guides(size = FALSE, colour = guide_legend(override.aes = list(size=4))) + all_theme +
+                  theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()) + 
+                  scale_colour_manual(values = c("#619CFF","#F8766D","#00BA38")) +  
+                  geom_hline(yintercept = 1e-8) +
+                  coord_cartesian(ylim=c(-1.5e-9, 2.25e-8), xlim = c(-4.1e-10, 2.3e-8)) + 
+                  annotate("text", x=7.5e-11, y=1.01e-8, label="AJ\nnon-AJ") + annotate("text", x=7.5e-11, y=-1.75e-9, label="NW") + annotate("text", x=2.3e-8, y=-1.75e-9, label="SE")
+
+ancestry = glm_details[which(glm_details$Category=="Ancestry"),]
+ancestry["Ancestry Cline"] = "NW - SE"
+ancestry[which(ancestry$Variable=="AJ" | ancestry$Variable=="non-AJ"), "Ancestry Cline"] = "AJ - non-AJ"
+ancestry$Variable = as.character(ancestry$Variable)
+
+tmb_ajnonaj_bin = ggbarplot(ancestry[which(ancestry$`Ancestry Cline`=="AJ - non-AJ" 
+                                       & ancestry$Cancer=="Non-Small_Cell_Lung_Cancer"),], 
+                  x="Variable", y = "Prop", fill = "Variable", facet.by = "Source") + ylab("TMB-H Proportion in NSCLC") +
+                  all_theme + scale_x_discrete(limits=c("non-AJ", "AJ")) +
+                  guides(size = F, fill = F, color = F) +
+                  scale_fill_manual(values = c("#CC79A7", "#7E57C2")) + geom_errorbar(aes(x=Variable, ymin = Prop - SE, ymax = Prop + SE),
+                  position = position_dodge(width = 1), width = 0.5) + ylim(0,0.48) +
+                  theme(plot.margin = unit(c(0,0,0,50), "pt")) + xlab("Ancestry") + 
+                  geom_signif(stat='identity', inherit.aes = F,
+                  data=sigBinary[which(sigBinary$Category=="AJnonAJ"),], 
+                       aes(x = group1, xend=group2, y = c(0.19, 0.45), yend = c(0.19, 0.45), annotation = Label, textsize=4), manual =T)
+
+tmb_ajnonaj_violin = ggviolin(data[which(data$Cancer=="Non-Small_Cell_Lung_Cancer"),], 
+                  x="AJ - non-AJ", y = "TMB", fill = "AJ - non-AJ", facet.by = "Source") +
+                  ylab("TMB in NSCLC") + scale_x_discrete(limits=c("non-AJ", "AJ"))+  xlab("Ancestry") +
+                  guides(size = F, fill = F, color = F) + coord_cartesian(ylim=c(0,25)) +
+                  geom_boxplot(width = 0.2, alpha = 0.8, fill = 'grey', color = 'grey25')  + scale_fill_manual(values = c("#7E57C2", "#CC79A7")) + all_theme
+
+tmb_nwse_bin = ggbarplot(ancestry[which(ancestry$`Ancestry Cline`=="NW - SE" 
+                                       & ancestry$Cancer=="Ovarian_Cancer"),], 
+                  x="Variable", y = "Prop", fill = "Variable", facet.by = "Source") + ylab("TMB-H Proportion") +
+                  scale_x_discrete(limits=c("NW", "SE")) + guides(size = F, fill = F, color = F) +
+                  scale_fill_manual(values = c("#7E57C2", "#CC79A7")) + geom_errorbar(aes(x=Variable, ymin = Prop - SE, ymax = Prop + SE),
+                  position = position_dodge(width = 1), width = 0.5) + all_theme + xlab("Ancestry") + 
+                  geom_signif(stat='identity', inherit.aes = F,
+                  data=sigBinary[which(sigBinary$Category=="NWSE"),], 
+                       aes(x = group1, xend=group2, y = c(0.18), yend = c(0.18), annotation = Label, textsize=4), manual =T)
+
+tmb_nwse_violin = ggviolin(data[which(data$Cancer=="Ovarian_Cancer"),], 
+                  x="NW - SE", y = "TMB", fill = "NW - SE", facet.by = "Source") +
+                  ylab("TMB") + scale_x_discrete(limits=c("NW", "SE")) + 
+                  guides(size = F, fill = F, color = F) + coord_cartesian(ylim=c(0,25)) +
+                  geom_boxplot(width = 0.2, alpha = 0.8, fill = 'grey', color = 'grey25') + scale_fill_manual(values = c("#7E57C2", "#CC79A7")) + all_theme
+
+
+tempus_eur = ggplot(tempus_details, aes(ProjectedPC1, ProjectedPC2)) + geom_point(aes(color = "#00BA38", alpha = 0.8), show.legend = F) +
+                  xlab("NW - SE Cline") + ylab("AJ - non-AJ Cline") + ggtitle("Tempus") + coord_cartesian(ylim=c(-1.5e-9, 2.25e-8), xlim = c(-4.1e-10, 2.3e-8)) +
+                  annotate("text", x=5e-9, y=2.1e-08, label = "Tumor-Normal Samples\nPC1: R = 0.95, PC2: R=0.91") + 
+                  guides(size = F, color = F) + geom_hline(yintercept = 1e-8) + 
+                  scale_colour_manual(values = c("#00BA38")) + all_theme +
+                  annotate("text", x=7.5e-11, y=1.01e-8, label="AJ\nnon-AJ") + annotate("text", x=7.5e-11, y=-1.75e-9, label="NW") + annotate("text", x=2.3e-8, y=-1.75e-9, label="SE")
+
+outcomes["origProjectedPC1"] = outcomes$ProjectedPC1
+outcomes["origProjectedPC2"] = outcomes$ProjectedPC2
+outcomes$ProjectedPC2 = 0
+outcomes[which(outcomes$origProjectedPC2>=1e-8),"ProjectedPC1"] = NA
+outcomes[which(is.na(outcomes$origProjectedPC2)),"ProjectedPC2"] = NA
+outcomes[which(outcomes$origProjectedPC2>=1e-8),"ProjectedPC2"] = 1
+outcomes$ProjectedPC2 = factor(outcomes$ProjectedPC2, levels = c(0,1), labels = c("non-AJ", "AJ"))
+
+mean_projectedPC1 = mean(outcomes$ProjectedPC1, na.rm = T)
+sd_projectedPC1 = sd(outcomes$ProjectedPC1, na.rm = T)
+thresh = mean_projectedPC1 + 2*sd_projectedPC1
+thresh = scientific(thresh, 2)
+
+
+ancestry_assoc = data.frame(rep(unique(outcomes$Cancer),6), stringsAsFactors = F)
+colnames(ancestry_assoc) = "Cancer"
+ancestry_assoc["Burden"] = c(rep("CNB", length(unique(outcomes$Cancer))), rep("TMB", length(unique(outcomes$Cancer))), rep("All CNB", length(unique(outcomes$Cancer))),
+                              rep("CNB", length(unique(outcomes$Cancer))), rep("TMB", length(unique(outcomes$Cancer))), rep("All CNB", length(unique(outcomes$Cancer))))
+ancestry_assoc["Cline"] = c(rep("AJ-nonAJ",3*length(unique(outcomes$Cancer))),rep("NW-SE",3*length(unique(outcomes$Cancer))))
+ancestry_assoc["Beta"] = NA
+ancestry_assoc["Stderr"] = NA
+ancestry_assoc["Pvalue"] = NA
+
+anc_analysis = outcomes
+anc_analysis$ProjectedPC1 = scale(anc_analysis$ProjectedPC1)
+for(i in unique(anc_analysis$Cancer)){
+  data = anc_analysis[which(anc_analysis$Cancer==i),]
+  if(i %in% c("Breast_Carcinoma","Endometrial_Cancer","Prostate_Cancer","Ovarian_Cancer")){
+    tmb_anc1 = summary(lm(data$MSSProteinTMB ~ data$ProjectedPC1 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic)))
+    tmb_anc2 = summary(lm(data$MSSProteinTMB ~ data$ProjectedPC2 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic)))
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "TMB" & ancestry_assoc$Cline == "NW-SE"),] = c(i, "TMB", "NW-SE", tmb_anc1$coefficients[2,c(1,2,4)])
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "TMB" & ancestry_assoc$Cline == "AJ-nonAJ"),] = c(i, "TMB", "AJ-nonAJ", tmb_anc2$coefficients[2,c(1,2,4)])
+    
+    cnb_anc1 = summary(lm(data$MSSDeepCNB ~ data$ProjectedPC1 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic)))
+    cnb_anc2 = summary(lm(data$MSSDeepCNB ~ data$ProjectedPC2 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic)))
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "CNB" & ancestry_assoc$Cline == "NW-SE"),] = c(i, "CNB", "NW-SE", cnb_anc1$coefficients[2,c(1,2,4)])
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "CNB" & ancestry_assoc$Cline == "AJ-nonAJ"),] = c(i, "CNB", "AJ-nonAJ", cnb_anc2$coefficients[2,c(1,2,4)])
+    
+    allcnb_anc1 = summary(lm(data$MSSCNB ~ data$ProjectedPC1 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic)))
+    allcnb_anc2 = summary(lm(data$MSSCNB ~ data$ProjectedPC2 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic)))
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "All CNB" & ancestry_assoc$Cline == "NW-SE"),] = c(i, "All CNB", "NW-SE", allcnb_anc1$coefficients[2,c(1,2,4)])
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "All CNB" & ancestry_assoc$Cline == "AJ-nonAJ"),] = c(i, "All CNB", "AJ-nonAJ", allcnb_anc2$coefficients[2,c(1,2,4)])
+    } else{
+    tmb_anc1 = summary(lm(data$MSSProteinTMB ~ data$ProjectedPC1 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic) + as.factor(data$SEX)))
+    tmb_anc2 = summary(lm(data$MSSProteinTMB ~ data$ProjectedPC2 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic) + as.factor(data$SEX)))
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "TMB" & ancestry_assoc$Cline == "NW-SE"),] = c(i, "TMB", "NW-SE", tmb_anc1$coefficients[2,c(1,2,4)])
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "TMB" & ancestry_assoc$Cline == "AJ-nonAJ"),] = c(i, "TMB", "AJ-nonAJ", tmb_anc2$coefficients[2,c(1,2,4)])
+    
+    cnb_anc1 = summary(lm(data$MSSDeepCNB ~ data$ProjectedPC1 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic) + as.factor(data$SEX)))
+    cnb_anc2 = summary(lm(data$MSSDeepCNB ~ data$ProjectedPC2 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic) + as.factor(data$SEX)))
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "CNB" & ancestry_assoc$Cline == "NW-SE"),] = c(i, "CNB", "NW-SE", cnb_anc1$coefficients[2,c(1,2,4)])
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "CNB" & ancestry_assoc$Cline == "AJ-nonAJ"),] = c(i, "CNB", "AJ-nonAJ", cnb_anc2$coefficients[2,c(1,2,4)])
+    
+    allcnb_anc1 = summary(lm(data$MSSCNB ~ data$ProjectedPC1 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic) + as.factor(data$SEX)))
+    allcnb_anc2 = summary(lm(data$MSSCNB ~ data$ProjectedPC2 + data$AGE + as.factor(data$PANEL_VERSION) + data$TUMOR_PURITY + as.factor(data$Metastatic) + as.factor(data$SEX)))
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "All CNB" & ancestry_assoc$Cline == "NW-SE"),] = c(i, "All CNB", "NW-SE", allcnb_anc1$coefficients[2,c(1,2,4)])
+    ancestry_assoc[which(ancestry_assoc$Cancer == i & ancestry_assoc$Burden == "All CNB" & ancestry_assoc$Cline == "AJ-nonAJ"),] = c(i, "All CNB", "AJ-nonAJ", allcnb_anc2$coefficients[2,c(1,2,4)])  
+  }
+}
+
+x=data.frame(table(outcomes$Cancer, outcomes$ProjectedPC2))
+x=x[which(x$Var2==1),]
+toofew = as.character(x[which(x$Freq<30),"Var1"])
+ancestry_assoc$Cancer = as.character(ancestry_assoc$Cancer)
+ancestry_assoc[which(ancestry_assoc$Cancer %in% toofew & ancestry_assoc$Cline=="AJ-nonAJ"),4:6] = NA
+tmb_meta = rma(yi = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="TMB" & ancestry_assoc$Cline == "NW-SE"),"Beta"]), sei = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="TMB" & ancestry_assoc$Cline == "NW-SE"),"Stderr"]), method = "FE")
+
+cnb_meta = rma(yi = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="CNB" & ancestry_assoc$Cline == "NW-SE"),"Beta"]), sei = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="CNB" & ancestry_assoc$Cline == "NW-SE"),"Stderr"]), method = "FE")
+
+allcnb_meta = rma(yi = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="All CNB" & ancestry_assoc$Cline == "NW-SE"),"Beta"]), sei = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="All CNB" & ancestry_assoc$Cline == "NW-SE"),"Stderr"]), method = "FE")
+
+ancestry_assoc = rbind(ancestry_assoc, c("Pan-Cancer", "TMB", "NW-SE", tmb_meta$beta, tmb_meta$se, tmb_meta$pval))
+ancestry_assoc = rbind(ancestry_assoc, c("Pan-Cancer","CNB", "NW-SE", cnb_meta$beta, cnb_meta$se, cnb_meta$pval))
+ancestry_assoc = rbind(ancestry_assoc, c("Pan-Cancer","All CNB", "NW-SE", allcnb_meta$beta, allcnb_meta$se, allcnb_meta$pval))
+
+tmb_meta = rma(yi = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="TMB" & ancestry_assoc$Cline == "AJ-nonAJ"),"Beta"]), sei = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="TMB" & ancestry_assoc$Cline == "AJ-nonAJ"),"Stderr"]), method = "FE")
+
+cnb_meta = rma(yi = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="CNB" & ancestry_assoc$Cline == "AJ-nonAJ"),"Beta"]), sei = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="CNB" & ancestry_assoc$Cline == "AJ-nonAJ"),"Stderr"]), method = "FE")
+
+allcnb_meta = rma(yi = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="All CNB" & ancestry_assoc$Cline == "AJ-nonAJ"),"Beta"]), sei = as.numeric(ancestry_assoc[which(ancestry_assoc$Burden=="All CNB" & ancestry_assoc$Cline == "AJ-nonAJ"),"Stderr"]), method = "FE")
+
+ancestry_assoc = rbind(ancestry_assoc, c("Pan-Cancer","TMB", "AJ-nonAJ", tmb_meta$beta, tmb_meta$se, tmb_meta$pval))
+ancestry_assoc = rbind(ancestry_assoc, c("Pan-Cancer","CNB", "AJ-nonAJ", cnb_meta$beta, cnb_meta$se, cnb_meta$pval))
+ancestry_assoc = rbind(ancestry_assoc, c("Pan-Cancer","All CNB", "AJ-nonAJ", allcnb_meta$beta, allcnb_meta$se, allcnb_meta$pval))
+ancestry_assoc["Sample"] = "Tumor"
+ancestry_assoc["Source"] = "Profile"
+
+ancestry_association <- read.delim("~/Desktop/Cancer/Burden/Tempus/ancestry_association_binaryAJ.txt", stringsAsFactors = F)
+colnames(ancestry_association) = c("Cancer","Burden","Cline","Beta","Stderr","Pvalue","Sample")
+ancestry_association[which(ancestry_association$Burden=="ProteinTMB"),"Burden"] = "TMB"
+ancestry_association[which(ancestry_association$Cline=="AJ - non AJ"),"Cline"] = "AJ-nonAJ"
+ancestry_association[which(ancestry_association$Cline=="NW - SE"),"Cline"] = "NW-SE"
+colnames(ancestry_assoc) = c("Cancer","Burden","Cline","Beta","Stderr","Pvalue","Sample","Source")
+
+tmb_meta = rma(yi = as.numeric(ancestry_association[which(ancestry_association$Burden=="TMB" & 
+                                                    ancestry_association$Cline == "NW-SE" & ancestry_association$Sample=="Tumor"),"Beta"]), 
+               sei = as.numeric(ancestry_association[which(ancestry_association$Burden=="TMB" & ancestry_association$Cline == "NW-SE" &
+                                                    ancestry_association$Sample=="Tumor"),"Stderr"]), method = "FE")
+cnb_meta = rma(yi = as.numeric(ancestry_association[which(ancestry_association$Burden=="CNB" & 
+                                                    ancestry_association$Cline == "NW-SE" & ancestry_association$Sample=="Tumor"),"Beta"]), 
+               sei = as.numeric(ancestry_association[which(ancestry_association$Burden=="CNB" & ancestry_association$Cline == "NW-SE" &
+                                                    ancestry_association$Sample=="Tumor"),"Stderr"]), method = "FE")
+ancestry_association = rbind(ancestry_association, c("Pan-Cancer","TMB", "NW-SE", tmb_meta$beta, tmb_meta$se, tmb_meta$pval,"Tumor"))
+ancestry_association = rbind(ancestry_association, c("Pan-Cancer","CNB", "NW-SE", cnb_meta$beta, cnb_meta$se, cnb_meta$pval,"Tumor"))
+
+tmb_meta = rma(yi = as.numeric(ancestry_association[which(ancestry_association$Burden=="TMB" & 
+                                                    ancestry_association$Cline == "AJ-nonAJ" & ancestry_association$Sample=="Tumor"),"Beta"]), 
+               sei = as.numeric(ancestry_association[which(ancestry_association$Burden=="TMB" & ancestry_association$Cline == "AJ-nonAJ" &
+                                                    ancestry_association$Sample=="Tumor"),"Stderr"]), method = "FE")
+cnb_meta = rma(yi = as.numeric(ancestry_association[which(ancestry_association$Burden=="CNB" & 
+                                                    ancestry_association$Cline == "AJ-nonAJ" & ancestry_association$Sample=="Tumor"),"Beta"]), 
+               sei = as.numeric(ancestry_association[which(ancestry_association$Burden=="CNB" & ancestry_association$Cline == "AJ-nonAJ" &
+                                                    ancestry_association$Sample=="Tumor"),"Stderr"]), method = "FE")
+ancestry_association = rbind(ancestry_association, c("Pan-Cancer","TMB", "AJ-nonAJ", tmb_meta$beta, tmb_meta$se, tmb_meta$pval,"Tumor"))
+ancestry_association = rbind(ancestry_association, c("Pan-Cancer","CNB", "AJ-nonAJ", cnb_meta$beta, cnb_meta$se, cnb_meta$pval,"Tumor"))
+
+tmb_meta = rma(yi = as.numeric(ancestry_association[which(ancestry_association$Burden=="TMB" & 
+                                                    ancestry_association$Cline == "NW-SE" & ancestry_association$Sample=="Normal"),"Beta"]), 
+               sei = as.numeric(ancestry_association[which(ancestry_association$Burden=="TMB" & ancestry_association$Cline == "NW-SE" &
+                                                    ancestry_association$Sample=="Normal"),"Stderr"]), method = "FE")
+cnb_meta = rma(yi = as.numeric(ancestry_association[which(ancestry_association$Burden=="CNB" & 
+                                                    ancestry_association$Cline == "NW-SE" & ancestry_association$Sample=="Normal"),"Beta"]), 
+               sei = as.numeric(ancestry_association[which(ancestry_association$Burden=="CNB" & ancestry_association$Cline == "NW-SE" &
+                                                    ancestry_association$Sample=="Normal"),"Stderr"]), method = "FE")
+ancestry_association = rbind(ancestry_association, c("Pan-Cancer","TMB", "NW-SE", tmb_meta$beta, tmb_meta$se, tmb_meta$pval,"Normal"))
+ancestry_association = rbind(ancestry_association, c("Pan-Cancer","CNB", "NW-SE", cnb_meta$beta, cnb_meta$se, cnb_meta$pval,"Normal"))
+
+tmb_meta = rma(yi = as.numeric(ancestry_association[which(ancestry_association$Burden=="TMB" & 
+                                                    ancestry_association$Cline == "AJ-nonAJ" & ancestry_association$Sample=="Normal"),"Beta"]), 
+               sei = as.numeric(ancestry_association[which(ancestry_association$Burden=="TMB" & ancestry_association$Cline == "AJ-nonAJ" &
+                                                    ancestry_association$Sample=="Normal"),"Stderr"]), method = "FE")
+cnb_meta = rma(yi = as.numeric(ancestry_association[which(ancestry_association$Burden=="CNB" & 
+                                                    ancestry_association$Cline == "AJ-nonAJ" & ancestry_association$Sample=="Normal"),"Beta"]), 
+               sei = as.numeric(ancestry_association[which(ancestry_association$Burden=="CNB" & ancestry_association$Cline == "AJ-nonAJ" &
+                                                    ancestry_association$Sample=="Normal"),"Stderr"]), method = "FE")
+ancestry_association = rbind(ancestry_association, c("Pan-Cancer","TMB", "AJ-nonAJ", tmb_meta$beta, tmb_meta$se, tmb_meta$pval,"Normal"))
+ancestry_association = rbind(ancestry_association, c("Pan-Cancer","CNB", "AJ-nonAJ", cnb_meta$beta, cnb_meta$se, cnb_meta$pval,"Normal"))
+
+ancestry_association["Source"] = "Tempus"
+ancestry_assoc = rbind(ancestry_assoc, ancestry_association)
+ancestry_assoc$Beta = as.numeric(ancestry_assoc$Beta)
+ancestry_assoc$Stderr = as.numeric(ancestry_assoc$Stderr)
+ancestry_assoc["CI_Upper"] = ancestry_assoc$Beta + ancestry_assoc$Stderr * qnorm(0.975)
+ancestry_assoc["CI_Lower"] = ancestry_assoc$Beta - ancestry_assoc$Stderr * qnorm(0.975)
+
+ancestry_assoc$Cancer = str_replace_all(ancestry_assoc$Cancer, "_", " ")
+ancestry_assoc$Cancer = factor(ancestry_assoc$Cancer,levels = the_cancer)
+
+ancestry_assoc["Significant"] = ""
+ancestry_assoc$Pvalue = as.numeric(ancestry_assoc$Pvalue)
+ancestry_assoc[which(ancestry_assoc$Pvalue<0.05),"Significant"] = "*"
+
+rep_dim = NULL
+rep_cancer = NULL
+rep_cline = NULL
+rep_outcome = NULL
+for(i in unique(ancestry_assoc$Cline)){
+  for(j in unique(ancestry_assoc$Burden)){
+    discov_dim = dim(ancestry_assoc[which(ancestry_assoc$Cline==i & 
+                                ancestry_assoc$Source=="Profile" &
+                                ancestry_assoc$Burden==j & 
+                                ancestry_assoc$Cancer!="Pan-Cancer"),])[1]
+    
+    ancestry_assoc[which(ancestry_assoc$Cline==i & 
+                                ancestry_assoc$Source=="Profile" &
+                                ancestry_assoc$Burden==j & 
+                                ancestry_assoc$Cancer!="Pan-Cancer" &
+                                ancestry_assoc$Pvalue < (0.05/discov_dim)),"Significant"] = "***"
+    
+    if(j!="All CNB"){
+      rep = ancestry_assoc[which(ancestry_assoc$Cline == i &
+                ancestry_assoc$Source == "Profile" &
+                ancestry_assoc$Burden == j &
+                ancestry_assoc$Cancer != "Pan-Cancer" &
+                ancestry_assoc$Cancer != "Non-Hodgkin_Lymphoma" &
+                ancestry_assoc$Cancer != "Renal_Cell_Carcinoma" &
+                ancestry_assoc$Cancer != "Leukemia" &
+                ancestry_assoc$Pvalue < (0.05/discov_dim)),]
+      rep_dim = c(rep_dim, rep(dim(rep)[1], dim(rep)[1]))
+      rep_cancer = c(rep_cancer, as.character(rep$Cancer))
+      rep_cline = c(rep_cline, rep$Cline)
+      rep_outcome = c(rep_outcome, rep$Burden)
+    }
+  }
+}
+
+rep = as.data.frame(rep_dim)
+colnames(rep) = "Dimensions"
+rep["Cancer"] = rep_cancer
+rep["Cline"] = rep_cline
+rep["Burden"] = rep_outcome
+
+for(i in 1:dim(rep)[1]){
+  this = rep[i,]
+  ancestry_assoc[which(ancestry_assoc$Burden==this$Burden & ancestry_assoc$Cancer==this$Cancer & ancestry_assoc$Cline==this$Cline &
+                         ancestry_assoc$Source=="Tempus" & ancestry_assoc$Pvalue<0.05),"Significant"] = "*"
+  ancestry_assoc[which(ancestry_assoc$Burden==this$Burden & ancestry_assoc$Cancer==this$Cancer & ancestry_assoc$Cline==this$Cline & 
+                         ancestry_assoc$Source=="Tempus" & ancestry_assoc$Pvalue<(0.05/this$Dimensions)),"Significant"] = "***"
+}
+ancestry_assoc[which(ancestry_assoc$Pvalue<0.05 & ancestry_assoc$Cancer=="Pan-Cancer"),"Significant"] = "**"
+ancestry_assoc$Pvalue = scientific(ancestry_assoc$Pvalue)
+ancestry = ancestry_assoc
+ancestry$Beta = round(ancestry$Beta, 3)
+ancestry$Stderr = round(ancestry$Stderr, 3)
+ancestry[which(ancestry$Cline=="AJ-nonAJ"),"Cline"] = "AJ - non-AJ Cline"
+ancestry[which(ancestry$Cline=="NW-SE"),"Cline"] = "NW - SE Cline"
+
+aj_tmb = ggplot(ancestry[which(ancestry$Burden=="TMB" &
+                                        ancestry$Cline=="AJ - non-AJ Cline"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("TMB") + geom_point(data=subset(ancestry[which(ancestry$Burden=="TMB" &
+                                        ancestry$Cline=="AJ - non-AJ Cline"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title.x = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0) + ylab("AJ - non-AJ\n")
+
+nw_tmb = ggplot(ancestry[which(ancestry$Burden=="TMB" &
+                                        ancestry$Cline=="NW - SE Cline"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  geom_point(data=subset(ancestry[which(ancestry$Burden=="TMB" &
+                                        ancestry$Cline=="NW - SE Cline"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0) + ylab("NW - SE Cline\n")
+
+aj_cnb = ggplot(ancestry[which(ancestry$Burden=="CNB" &
+                                        ancestry$Cline=="AJ - non-AJ Cline"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("CNB") + geom_point(data=subset(ancestry[which(ancestry$Burden=="CNB" &
+                                        ancestry$Cline=="AJ - non-AJ Cline"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+nw_cnb = ggplot(ancestry[which(ancestry$Burden=="CNB" &
+                                        ancestry$Cline=="NW - SE Cline"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  geom_point(data=subset(ancestry[which(ancestry$Burden=="CNB" &
+                                        ancestry$Cline=="NW - SE Cline"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+aj_cnball = ggplot(ancestry[which(ancestry$Burden=="All CNB" &
+                                        ancestry$Cline=="AJ - non-AJ Cline"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("All CNB") + geom_point(data=subset(ancestry[which(ancestry$Burden=="All CNB" &
+                                        ancestry$Cline=="AJ - non-AJ Cline"),], Source=="Profile")) +
+  guides(colour = F, size = F) + theme(axis.title.x = element_blank(), axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+nw_cnball = ggplot(ancestry[which(ancestry$Burden=="All CNB" &
+                                        ancestry$Cline=="NW - SE Cline"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  geom_point(data=subset(ancestry[which(ancestry$Burden=="All CNB" &
+                                        ancestry$Cline=="NW - SE Cline"),], Source=="Profile")) +
+  guides(colour = F, size = F) + theme(axis.title.y = element_blank(), axis.text.y = element_blank(), 
+                                       panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+main_ancestry = ancestry_assoc[which(ancestry_assoc$Burden=="TMB" & ancestry_assoc$Sample=="Tumor"),]
+main_ancestry[which(main_ancestry$Cline=="NW-SE"),"Cline"] = "NW - SE Cline"
+main_ancestry[which(main_ancestry$Cline=="AJ-nonAJ"),"Cline"] = "AJ - non-AJ"
+main_ancestry[which(main_ancestry$Cline=="NW - SE"),"Cline"] = "NW - SE Cline"
+main_ancestry[which(main_ancestry$Cline=="AJ - non-AJ"),"Cline"] = "AJ - non-AJ"
+main_ancestry$Cline = as.factor(main_ancestry$Cline)
+main_ancestry$Pvalue = as.numeric(main_ancestry$Pvalue)
+main_ancestry_fig = ggplot(main_ancestry, aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Source, label = Significant)) +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) + ggtitle("Ancestry-TMB") +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Cline, scales= "free") + 
+  guides(size = FALSE, colour = guide_legend(override.aes = list(size=1))) +  all_theme +
+  theme(panel.spacing = unit(0.5, "lines")) + scale_color_manual(values = c("#616161","#D39200")) + 
+  scale_y_discrete(limits=rev) + geom_text(position = position_dodge(0.5), size = 10, hjust = 0) + 
+  theme(legend.key.height = unit(1, 'cm'), legend.key.width = unit(1.5, 'cm'), legend.title = element_text(size=12), legend.text = element_text(size=12), legend.position = "right") + theme(plot.margin = unit(c(0,0,0,0), "pt"))
+#t, l, b, r
+layout = c(area(1,2,8,30),
+           area(9,1,15,30))
+
+supp_anc_plot = wrap_plots(aj_tmb + theme(plot.margin = unit(c(0,10,10,0), "pt"), 
+                                     axis.title.y = element_text(face="bold"), 
+                                     plot.title = element_text(face="bold"), 
+                                     plot.tag.position = c(0,1), 
+                                     plot.tag = element_text(hjust = -21)), 
+                  aj_cnb + theme(plot.margin = unit(c(0,10,10,10), "pt"), 
+                                   plot.title = element_text(face="bold")),
+                  aj_cnball + theme(plot.margin = unit(c(0,0,10,10), "pt"), 
+                                      plot.title = element_text(face="bold")),
+                  nw_tmb + theme(plot.margin = unit(c(0,10,10,0), "pt"), 
+                                    axis.title.y = element_text(face="bold"),
+                                    plot.tag.position = c(0,1), 
+                                    plot.tag = element_text(hjust = -21)),
+                  nw_cnb + theme(plot.margin = unit(c(0,10,10,10), "pt")), 
+                  nw_cnball + theme(plot.margin = unit(c(0,0,10,10), "pt")),
+    widths = c(2,2,1), guides='collect', tag_level = 'new') &  theme(legend.position='bottom') 
+
+supp_anc_plot = supp_anc_plot + plot_annotation(tag_levels = 'A')
+
+main_anc_plot = ((projected_eur_pcs / tempus_eur + plot_layout(guides='collect') & theme(legend.position='bottom')) | 
+((main_ancestry_fig /((tmb_ajnonaj_bin | tmb_ajnonaj_violin) + plot_annotation(title = "Non-Small Cell Lung Cancer") & theme(plot.title = element_text(hjust = 0.5)))) + plot_layout(design = layout))) + plot_annotation(tag_levels = "A") + plot_layout(widths = c(7,8))
+
+profile = ancestry_assoc[which(ancestry_assoc$Source=="Profile"),]
+profile = subset(profile, select = c(Cancer, Burden, Cline, Beta, Pvalue, Significant))
+tempus_tumor = ancestry_assoc[which(ancestry_assoc$Source=="Tempus" & ancestry_assoc$Sample=="Tumor"),]
+tempus_tumor = subset(tempus_tumor, select = c(Cancer, Burden, Cline, Beta, Pvalue, Significant))
+tempus_normal = ancestry_assoc[which(ancestry_assoc$Source=="Tempus" & ancestry_assoc$Sample=="Normal"),]
+tempus_normal = subset(tempus_normal, select = c(Cancer, Burden, Cline, Beta, Pvalue, Significant))
+ancestry_assoc = merge(profile, tempus_tumor, by = c("Cancer", "Burden", "Cline"), all = T)
+ancestry_assoc = merge(ancestry_assoc, tempus_normal, by = c("Cancer", "Burden", "Cline"), all = T)
+
+signif_ancestry = ancestry_assoc[which(ancestry_assoc$Significant.x %in% c("**","***")),]
+signif_ancestry = subset(signif_ancestry, select = c(Burden, Cline, Cancer, Beta.x, Pvalue.x, Beta.y, Pvalue.y, Beta, Pvalue))
+colnames(signif_ancestry) = c("Burden", "Ancestry Cline", "Cancer", "Beta Profile", "Pvalue Profile", "Beta Tumor", "Pvalue Tumor", "Beta Normal", "Pvalue Normal")
+write.table(signif_ancestry, "~/Desktop/Cancer/Burden/Paper/Tables/final_sigancestry.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+ancestry_assoc = subset(ancestry_assoc, select = c(Cancer, Burden, Cline, Beta.x, Pvalue.x, Beta.y, Pvalue.y, Beta, Pvalue))
+colnames(ancestry_assoc) = c("Cancer", "Burden", "Ancestry Cline", "Beta Profile", "Pvalue Profile", "Beta Tumor", "Pvalue Tumor", "Beta Normal", "Pvalue Normal")
+write.table(ancestry_assoc, "~/Desktop/Cancer/Burden/Paper/Tables/final_allancestry.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+
+nwse = bothcohorts[which(!is.na(bothcohorts$`NW - SE`)),]
+nwse = data.frame(table(nwse$Source, nwse$Cancer))
+colnames(nwse) = c("Source", "Cancer", "SampleSize")
+ajnonaj = bothcohorts[which(!is.na(bothcohorts$`AJ - non-AJ`)),]
+aj = data.frame(table(ajnonaj$Source, ajnonaj$Cancer, ajnonaj$`AJ - non-AJ`))
+aj = aj[which(aj$Var3=="AJ"),c(1,2,4)]
+colnames(aj) = c("Source", "Cancer", "AJ")
+ajnonaj = data.frame(table(ajnonaj$Source, ajnonaj$Cancer))
+colnames(ajnonaj) = c("Source", "Cancer", "SampleSize")
+ajnonaj = merge(ajnonaj, aj, by = c("Source", "Cancer"), all = T)
+
+bothcohorts["AJ-nonAJ"] = 0
+bothcohorts[which(bothcohorts$ProjectedPC2>=1e-8),"AJ-nonAJ"] = 1
+bothcohorts["NW-SE"] = bothcohorts$ProjectedPC1
+bothcohorts[which(bothcohorts$ProjectedPC2>=1e-8),"NW-SE"] = NA
+
+discov = ancestry_assoc[which(as.numeric(ancestry_assoc$`Pvalue Profile`)<0.05 & ancestry_assoc$Cancer!="Pan-Cancer"),]
+discov$Cancer=as.character(discov$Cancer)
+discov$Cancer=str_replace_all(discov$Cancer," ","_")
+discov$Cancer=str_replace_all(discov$Cancer,"\n","_")
+#discov = rbind(discov, ancestry_assoc[which(as.numeric(ancestry_assoc$`Pvalue Profile`)<0.05 & ancestry_assoc$Cancer=="Pan-Cancer"),])
+discov["Z_Rep"] = NA
+discov["P_Rep"] = NA
+discov["Power_NomRep"] = NA
+for(line in 1:nrow(discov)){
+  cline=discov[line, "Ancestry Cline"]
+  burden=discov[line,"Burden"]
+  cancer=discov[line, "Cancer"]
+  var1 = var(bothcohorts[which(bothcohorts$Source=="Profile" & bothcohorts$Cancer==cancer), which(colnames(bothcohorts)==cline)], na.rm=T)
+  var2 = var(bothcohorts[which(bothcohorts$Source=="Tempus" & bothcohorts$Cancer==cancer), which(colnames(bothcohorts)==cline)], na.rm=T)
+  n1 = length(which(!is.na(bothcohorts[which(bothcohorts$Source=="Profile" & bothcohorts$Cancer==cancer), which(colnames(bothcohorts)==cline)])))
+  n2 = length(which(!is.na(bothcohorts[which(bothcohorts$Source=="Tempus" & bothcohorts$Cancer==cancer), which(colnames(bothcohorts)==cline)])))
+  #cancer_name=str_replace_all(cancer, " ", "_")
+  beta=as.numeric(discov[line,"Beta Profile"])
+  pval=as.numeric(discov[line,"Pvalue Profile"])
+  z=abs(qnorm(pval/2, lower.tail = F))
+  discov[line, 10:12] = power_calculator(z, var1, var2, n1, n2)
+  
+}
+discov = discov[-which(is.na(discov$`Pvalue Tumor`)),]
+discov["Power_BonRep"] = NA
+discov[which(as.numeric(discov$`Pvalue Profile`)<0.05/17),"Power_BonRep"] = 0
+discov[which(as.numeric(discov$`Pvalue Profile`)<0.05/17 & as.numeric(discov$P_Rep)<0.05),"Power_BonRep"] = 1
+discov[which(as.numeric(discov$`Pvalue Profile`)<0.05/17 & as.numeric(discov$P_Rep)<0.05/9),"Power_BonRep"] = 2
+discov["Rep"] = NA
+discov[which(as.numeric(discov$`Pvalue Profile`)<0.05/17 & as.numeric(discov$`Pvalue Tumor`)<0.05/9),"Rep"] = 1
+rm(layout, nw_tmb, nw_cnb, nw_cnball, aj_tmb, aj_cnb, aj_cnball, anc_legend, anc_analysis, ancestry_association,  cnb_anc1, 
+   cnb_anc2, cnb_anc, cnb_meta, tempus_counts, i, tmb_anc, tmb_meta, ancestry, ancestry_assoc, discov_dim,
+   allcnb_anc2, j, mean_projectedPC1, rep_cancer, rep_cline, rep_dim, rep_outcome, sd_projectedPC1, thresh, toofew, x, 
+   allcnb_meta, tmb_anc1, tmb_anc2, tmb_anc_bin, this, rep, projected_eur_pcs, main_ancestry, main_ancestry_fig, allcnb_anc1, ancestry, fig_outcomes)
+```
+
+```{r prs, echo = F}
+source('~/Desktop/Cancer/prs_lmm_analyses.R')
+
+PRS$Pvalue = as.numeric(PRS$Pvalue)
+bestPRS = NULL
+for(i in unique(PRS$Cancer)){
+  for(j in unique(PRS$Burden)){
+    for(k in unique(PRS$PRS)){
+      check = PRS[which(PRS$Cancer==i & PRS$Burden==j & PRS$PRS==k & PRS$Source=="Profile"),]
+      level = check[which(check$Pvalue==min(check$Pvalue)),"Level"]
+      add = PRS[which(PRS$Cancer==i & PRS$Burden==j & PRS$PRS==k & PRS$Level==level),]
+      bestPRS = rbind(bestPRS, add)
+    }
+  }
+}
+
+worstPRS = NULL
+for(i in unique(PRS$Cancer)){
+  for(j in unique(PRS$Burden)){
+    for(k in unique(PRS$PRS)){
+      check = PRS[which(PRS$Cancer==i & PRS$Burden==j & PRS$PRS==k & PRS$Source=="Profile"),]
+      level = check[which(check$Pvalue==max(check$Pvalue)),"Level"]
+      add = PRS[which(PRS$Cancer==i & PRS$Burden==j & PRS$PRS==k & PRS$Level==level),]
+      worstPRS = rbind(worstPRS, add)
+    }
+  }
+}
+
+avePRS = NULL
+for(i in unique(PRS$Cancer)){
+  for(j in unique(PRS$Burden)){
+    for(k in unique(PRS$PRS)){
+      check = PRS[which(PRS$Cancer==i & PRS$Burden==j & PRS$PRS==k & PRS$Source=="Profile"),]
+      meanprs = mean(check$Pvalue)
+      medprs = median(check$Pvalue)
+      add = c(i, j, k, "Profile", meanprs, medprs)
+      avePRS = rbind(avePRS, add)
+    }
+  }
+}
+avePRS = data.frame(avePRS)
+colnames(avePRS) = c("Cancer", "Burden", "PRS", "Source", "Mean", "Median")
+avePRS$Mean = as.numeric(as.character(avePRS$Mean))
+avePRS$Median = as.numeric(as.character(avePRS$Median))
+
+
+hits = NULL
+for(i in unique(PRS$Cancer)){
+  for(j in unique(PRS$Burden)){
+    discov_dim = dim(bestPRS[which(bestPRS$Cancer==i & bestPRS$Burden==j & bestPRS$Source=="Profile"),])[1]
+    bestPRS$Pvalue=as.numeric(bestPRS$Pvalue)
+    discov = bestPRS[which(bestPRS$Cancer==i & bestPRS$Burden==j & bestPRS$Source=="Profile" & bestPRS$Pvalue<0.05/discov_dim),]
+    hits = rbind(hits, discov)
+  }
+}
+
+check = NULL
+temp = hits[which(hits$Burden!="All CNB"),]
+for(i in 1:dim(temp)[1]){
+  check = rbind(check, temp[i, ])
+  temp2 = PRS[which(PRS$Cancer==temp[i,"Cancer"] & PRS$Burden==temp[i,"Burden"] & PRS$PRS==temp[i,"PRS"] & PRS$Level==temp[i,"Level"] & PRS$Source=="Tempus"),]
+  check = rbind(check, temp2)
+}
+
+signif_results = check
+signif_results = rbind(signif_results, hits[which(hits$Burden=="All CNB"),])
+rep_pan = NULL
+temp = hits[which(hits$Burden!="All CNB" & hits$Cancer=="Pan-Cancer"),]
+for(line in 1:dim(temp)[1]){
+  rep_match = PRS[which(PRS$Burden==temp[line,"Burden"] & PRS$PRS==temp[line,"PRS"] & PRS$Level==temp[line,"Level"]),]
+  if(dim(rep_match[which(rep_match$Cancer=="Pan-Cancer" & rep_match$Pvalue < 0.1 & rep_match$Source=="Tempus"),])[1]> 0){
+      rep_match[which(rep_match$Pvalue<0.05),"Significant"] = "*"
+      rep_match[which(rep_match$Pvalue<0.05/dim(temp)[1]),"Significant"] = "***"
+     rep_pan = rbind(rep_pan, rep_match)
+  }
+}
+
+per_cnb_all_hits = hits[which(hits$Burden=="All CNB" & hits$Cancer!="Pan-Cancer"),]
+pan_cnb_all = hits[which(hits$Burden=="All CNB" & hits$Cancer=="Pan-Cancer"),]
+pan_cnb_all_hits = NULL
+for(i in unique(pan_cnb_all$PRS)){
+  check = pan_cnb_all[which(pan_cnb_all$PRS==i),]
+  temp = PRS[which(PRS$PRS==check$PRS & PRS$Burden==check$Burden & PRS$Level==check$Level),]
+  pan_cnb_all_hits = rbind(pan_cnb_all_hits, temp)
+}
+
+#By Hand
+#NSCLC & Cigarettes
+signifPerCancerPRS = per_cnb_all_hits[,1:3]
+per_cnb_all_hits$Beta = as.numeric(per_cnb_all_hits$Beta)
+signifPerCancerPRS["Profile"] = paste(round(per_cnb_all_hits$Beta, 3), 
+                                      "\n", scientific(per_cnb_all_hits$Pvalue, 3), sep = "")
+signifPerCancerPRS["Tempus (Tumor)"] = NA
+signifPerCancerPRS["Tempus (Normal)"] = NA
+
+temp = hits[which(hits$Cancer=="Non-Small_Cell_Lung_Cancer" & hits$Burden=="TMB" & hits$PRS=="GSCAN.CigarettesPerDay"),]
+temp$Beta = as.numeric(temp$Beta)
+temp2 = PRS[which(PRS$Cancer==temp$Cancer & PRS$Burden==temp$Burden & PRS$PRS==temp$PRS & PRS$Level==temp$Level & PRS$Source!="Profile"),]
+temp2$Beta = as.numeric(temp2$Beta)
+signifPerCancerPRS = rbind(signifPerCancerPRS, c("Non-Small_Cell_Lung_Cancer", "TMB", "GSCAN.CigarettesPerDay", 
+                        paste(round(temp$Beta, 3), "\n", scientific(temp$Pvalue, 3), sep = ""), 
+                        paste(round(temp2[which(temp2$Sample=="Tumor"),"Beta"], 3), "\n", scientific(temp2[which(temp2$Sample=="Tumor"),"Pvalue"], 3), sep = ""),
+                        paste(round(temp2[which(temp2$Sample=="Normal"),"Beta"], 3), "\n", scientific(temp2[which(temp2$Sample=="Normal"),"Pvalue"], 3), sep = "")))
+
+temp = hits[which(hits$Cancer=="Non-Small_Cell_Lung_Cancer" & hits$Burden=="TMB" & hits$PRS=="UKB_460K.cov_EDU_YEARS"),]
+temp$Beta = as.numeric(temp$Beta)
+temp2 = PRS[which(PRS$Cancer==temp$Cancer & PRS$Burden==temp$Burden & PRS$PRS==temp$PRS & PRS$Level==temp$Level & PRS$Source!="Profile"),]
+temp2$Beta = as.numeric(temp2$Beta)
+signifPerCancerPRS = rbind(signifPerCancerPRS, c("Non-Small_Cell_Lung_Cancer", "TMB", "UKB_460K.cov_EDU_YEARS", 
+                        paste(round(temp$Beta, 3), "\n", scientific(temp$Pvalue, 3), sep = ""), 
+                        paste(round(temp2[which(temp2$Sample=="Tumor"),"Beta"], 3), "\n", scientific(temp2[which(temp2$Sample=="Tumor"),"Pvalue"], 3), sep = ""),
+                        paste(round(temp2[which(temp2$Sample=="Normal"),"Beta"], 3), "\n", scientific(temp2[which(temp2$Sample=="Normal"),"Pvalue"], 3), sep = "")))
+
+temp = hits[which(hits$Cancer=="Melanoma" & hits$Burden=="TMB" & hits$PRS=="UKB_460K.pigment_TANNING"),]
+temp$Beta = as.numeric(temp$Beta)
+temp2 = PRS[which(PRS$Cancer==temp$Cancer & PRS$Burden==temp$Burden & PRS$PRS==temp$PRS & PRS$Level==temp$Level & PRS$Source!="Profile"),]
+temp2$Beta = as.numeric(temp2$Beta)
+signifPerCancerPRS = rbind(signifPerCancerPRS, c("Melanoma", "TMB", "UKB_460K.pigment_TANNING", 
+                        paste(round(temp$Beta, 3), "\n", scientific(temp$Pvalue, 3), sep = ""), 
+                        paste(round(temp2[which(temp2$Sample=="Tumor"),"Beta"], 3), "\n", scientific(temp2[which(temp2$Sample=="Tumor"),"Pvalue"], 3), sep = ""),
+                        paste(round(temp2[which(temp2$Sample=="Normal"),"Beta"], 3), "\n", scientific(temp2[which(temp2$Sample=="Normal"),"Pvalue"], 3), sep = "")))
+
+signifPerCancerPRS$PRS = as.character(signifPerCancerPRS$PRS)
+signifPerCancerPRS[which(is.na(signifPerCancerPRS$`Tempus (Normal)`)),"Tempus (Normal)"] = "---"
+signifPerCancerPRS[which(is.na(signifPerCancerPRS$`Tempus (Tumor)`)),"Tempus (Tumor)"] = "---"
+signifPerCancerPRS = subset(signifPerCancerPRS, select = c(Burden, Cancer, PRS, Profile, `Tempus (Tumor)`, `Tempus (Normal)`))
+rownames(signifPerCancerPRS) = 1:dim(signifPerCancerPRS)[1]
+signifPerCancerPRS[which(signifPerCancerPRS$PRS=="TRICL.smoker.HM3"),"PRS"] = "Smokers with lung cancer"
+signifPerCancerPRS[which(signifPerCancerPRS$PRS=="UKB_460K.pigment_TANNING"),"PRS"] = "Ease of Tanning"
+signifPerCancerPRS[which(signifPerCancerPRS$PRS=="GSCAN.CigarettesPerDay"),"PRS"] = "Cigarettes per day"
+signifPerCancerPRS[which(signifPerCancerPRS$PRS=="UKB_460K.cov_EDU_YEARS"),"PRS"] = "Education (in years)"
+signifPerCancerPRS[which(signifPerCancerPRS$PRS=="GSCAN.DrinksPerWeek"),"PRS"] = "Drinks Per Week"
+signifPerCancerPRS[which(signifPerCancerPRS$PRS=="UKB_460K.disease_AID_SURE"),"PRS"] = "Autoimmune disease (sure)"
+signifPerCancerPRS[which(signifPerCancerPRS$PRS=="ProstateCancer_Meta_Schumacher2018"), "PRS"] = "Prostate cancer risk"
+colnames(signifPerCancerPRS)[5:6] = c("Tempus\n(Tumor)","Tempus\n(Normal)")
+signifPerCancerPRS$Cancer = str_replace_all(signifPerCancerPRS$Cancer, "_", " ")
+
+PRS$Level = as.character(PRS$Level)
+temp=hits[which(hits$Burden=="TMB" & hits$PRS %in% c("GSCAN.CigarettesPerDay", "UKB_460K.cov_EDU_YEARS") & hits$Cancer=="Pan-Cancer"),]
+
+###HARD CODED
+z=PRS[which(PRS$Level==1 & PRS$Burden=="TMB" & PRS$PRS =="GSCAN.CigarettesPerDay"),]
+z=rbind(z, PRS[which(PRS$Level==0 & PRS$Burden=="TMB" & PRS$PRS =="UKB_460K.cov_EDU_YEARS"),])
+z=rbind(z, PRS[which(PRS$Level==6 & PRS$Burden=="TMB" & PRS$PRS =="UKB_460K.blood_WHITE_COUNT"),])
+#z=z[-which(z$Level==temp$Level & z$Source=="Tempus"),]
+PRS["Level"] = paste0("5e-",PRS$Level)
+PRS[which(PRS$Level=="5e-0"),"Level"] = 1
+colnames(PRS)[4] = "Threshold"
+#write.table(PRS, "~/Desktop/Cancer/Burden/Paper/Tables/prs.txt", col.names = T, row.names = F, quote = F, sep = '\t')
+figPanCancerPRS = rbind(pan_cnb_all_hits, z)
+figPanCancerPRS$Stderr = as.numeric(figPanCancerPRS$Stderr)
+figPanCancerPRS$Beta = as.numeric(figPanCancerPRS$Beta)
+figPanCancerPRS$Pvalue = as.numeric(figPanCancerPRS$Pvalue)
+figPanCancerPRS["CI_Upper"] = figPanCancerPRS$Beta + figPanCancerPRS$Stderr * qnorm(0.975)
+figPanCancerPRS["CI_Lower"] = figPanCancerPRS$Beta - figPanCancerPRS$Stderr * qnorm(0.975)
+
+
+figPanCancerPRS["Significant"] = ""
+figPanCancerPRS[which(figPanCancerPRS$Pvalue<0.05),"Significant"] = "*"
+figPanCancerPRS[which(figPanCancerPRS$Pvalue<0.05/14),"Significant"] = "***"
+figPanCancerPRS[which(figPanCancerPRS$Cancer=="Non-Small_Cell_Lung_Cancer" & figPanCancerPRS$Source=="Tempus" & figPanCancerPRS$Pvalue<0.05/3),"Significant"] = "***"
+
+figPanCancerPRS[which(figPanCancerPRS$Pvalue<0.05 & figPanCancerPRS$Cancer=="Pan-Cancer"),"Significant"] = "**"
+figPanCancerPRS$Cancer = str_replace_all(figPanCancerPRS$Cancer, "_", " ")
+figPanCancerPRS$Cancer = factor(figPanCancerPRS$Cancer,levels = the_cancer)
+
+prs_legend = g_legend(ggplot(figPanCancerPRS[which(figPanCancerPRS$PRS=="GSCAN.CigarettesPerDay"),], 
+     aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample)) + geom_point(position = position_dodge(0.5)) +
+     scale_color_manual(values = c("red","blue")) + theme_bw() + theme(legend.key.height = unit(3, 'cm'), legend.key.width = unit(1, 'cm'), 
+     legend.title =   element_text(size=18), legend.text = element_text(size=18)) + guides(colour = guide_legend(override.aes = list(size=6))) + 
+     theme(legend.position = "bottom"))
+
+cig_tmb = ggplot(figPanCancerPRS[which(figPanCancerPRS$PRS=="GSCAN.CigarettesPerDay"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("Cigarettes Per Day PRS-TMB") + geom_point(data=subset(figPanCancerPRS[which(figPanCancerPRS$PRS=="GSCAN.CigarettesPerDay"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title.x = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+  
+
+edu_tmb = ggplot(figPanCancerPRS[which(figPanCancerPRS$PRS=="UKB_460K.cov_EDU_YEARS"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("Educational Attainment PRS-TMB") + geom_point(data=subset(figPanCancerPRS[which(figPanCancerPRS$PRS=="UKB_460K.cov_EDU_YEARS"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(), axis.title.x = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+
+wbc_tmb = ggplot(figPanCancerPRS[which(figPanCancerPRS$PRS=="UKB_460K.blood_WHITE_COUNT"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("White Blood Cell Count PRS-TMB") + geom_point(data=subset(figPanCancerPRS[which(figPanCancerPRS$PRS=="UKB_460K.blood_WHITE_COUNT"),], Source=="Profile")) +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  theme(panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("red","blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+  
+
+aid_cnb = ggplot(figPanCancerPRS[which(figPanCancerPRS$PRS=="UKB_460K.disease_AID_SURE"),], 
+  aes(x=Beta, y=Cancer, xmin = CI_Lower, xmax = CI_Upper, color = Sample, label = Significant)) + all_theme +
+  geom_point(position = position_dodge(0.5)) + geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) +
+  geom_errorbarh(position = position_dodge(0.5), height=0.0) + facet_grid(.~Source, scales= "free") + 
+  ggtitle("Autoimmune Disease PRS-All CNB") + geom_point(data=subset(figPanCancerPRS[which(figPanCancerPRS$PRS=="UKB_460K.disease_AID_SURE"),], Source=="Profile")) +
+  guides(colour = F) + 
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(), panel.spacing = unit(0.5, "lines")) + 
+  scale_color_manual(values = c("blue")) + scale_y_discrete(limits=rev) + 
+  geom_text(position = position_dodge(0.5), size = 10, hjust = 0)
+  
+
+prs_plot = wrap_plots(cig_tmb + theme(plot.margin = unit(c(0,10,10,0), "pt"), 
+                                    axis.title.y = element_text(face="bold"), 
+                                    plot.title = element_text(face="bold"), 
+                                    plot.tag.position = c(0,1), 
+                                    plot.tag = element_text(hjust = -21)), 
+                            edu_tmb + theme(plot.margin = unit(c(0,0,10,10), "pt"), 
+                                    plot.title = element_text(face="bold")),
+                            wbc_tmb + theme(plot.margin = unit(c(0,10,0,0), "pt"), 
+                                    axis.title.y = element_text(face="bold"),
+                                    plot.title = element_text(face="bold"),
+                                    plot.tag.position = c(0,1), 
+                                    plot.tag = element_text(hjust = -18)),
+                            aid_cnb + theme(plot.margin = unit(c(0,0,0,10), "pt"),
+                                          plot.title = element_text(face="bold")),
+                            guides='collect', tag_level = 'new') &  theme(legend.position='bottom') 
+
+prs_plot = prs_plot + plot_annotation(tag_levels = 'A')
+
+#rm(add, bestPRS, check, discov, hits, linear_combo, pan_cancer_rep, per_cancer_rep, rep_match, temp, discov_dim, i, j, k, level, x, signifPerCancerPRS, PRS, grob_table, pan_cnb_all, temp2, per_cnb_all_hits, rep_pan, z, pan_cnb_all_hits)
+
+profile = signif_results[which(signif_results$Source=="Profile"),]
+profile = subset(profile, select = c(Cancer, Burden, PRS, Level, Beta, Pvalue))
+tumor = signif_results[which(signif_results$Source=="Tempus" & signif_results$Sample=="Tumor"),]
+tumor = subset(tumor, select = c(Cancer, Burden, PRS, Level, Beta, Pvalue))
+normal = signif_results[which(signif_results$Source=="Tempus" & signif_results$Sample=="Normal"),]
+normal = subset(normal, select = c(Cancer, Burden, PRS, Level, Beta, Pvalue))
+prs = merge(profile, tumor, by = c("Cancer", "Burden", "PRS", "Level"), all = T)
+prs = merge(prs, normal, by = c("Cancer", "Burden", "PRS", "Level"), all = T)
+colnames(prs) = c("Cancer", "Burden", "PRS", "Threshold", "Beta_Profile", "Pvalue_Profile", "Beta_Tumor", "Pvalue_Tumor", "Beta_Normal", "Pvalue_Normal")
+write.table(prs, "~/Desktop/Cancer/Burden/Paper/Tables/final_sigprs.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+
+profile=bestPRS[which(bestPRS$Source=="Profile"),]
+profile = subset(profile, select = c(Cancer, Burden, PRS, Level, Beta, Pvalue))
+tumor=bestPRS[which(bestPRS$Source=="Tempus" & bestPRS$Sample=="Tumor"),]
+tumor = subset(tumor, select = c(Cancer, Burden, PRS, Level, Beta, Pvalue))
+normal=bestPRS[which(bestPRS$Source=="Tempus" & bestPRS$Sample=="Normal"),]
+normal = subset(normal, select = c(Cancer, Burden, PRS, Level, Beta, Pvalue))
+bestPRS = merge(profile, tumor, by = c("Cancer", "Burden", "PRS", "Level"), all = T)
+bestPRS = merge(bestPRS, normal, by = c("Cancer", "Burden", "PRS", "Level"), all = T)
+colnames(bestPRS) = c("Cancer","Burden", "PRS", "Level", "Beta_Profile", "Pvalue_Profile", "Beta_Tumor", "Pvalue_Tumor", "Beta_Normal", "Pvalue_Normal")
+write.table(bestPRS, "~/Desktop/Cancer/Burden/Paper/Tables/final_allprs.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+```
+
+```{r tmbh, echo =F, cache =T}
+one = final_glm[which(final_glm$Variable=="Age" & final_glm$Cancer %in% c('Bladder_Cancer', 'Breast_Carcinoma', 'Cancer_of_Unknown_Primary', 'Head_and_Neck_Carcinoma', 'Melanoma', 'Prostate_Cancer', 'Soft_Tissue_Sarcoma', 'Pan-Cancer')),]
+two = final_glm[which(final_glm$Cancer=="Pan-Cancer" & final_glm$Variable %in% c("18-50_51-58", "51-58_59-65", "59-65_66-71", "66-71_72-97", "18-50_72-97")),]
+three = final_glm[which(final_glm$Cancer%in%c("Breast_Carcinoma", "Pan-Cancer") & final_glm$Variable=="Metastatic"),]
+four = final_glm[which(final_glm$Cancer%in%c("Melanoma", "Pan-Cancer") & final_glm$Variable=="Sex"),]
+five = final_glm[which(final_glm$Variable=="NW-SE" & final_glm$Cancer%in%c("Ovarian_Cancer", "Pan-Cancer")),]
+six = final_glm[which(final_glm$Variable=="AJ-nonAJ" & final_glm$Cancer%in%c("Non-Small_Cell_Lung_Cancer", "Pan-Cancer")),]
+
+tmbh_prs["Source"] = "Profile"
+tmbh_prs = subset(tmbh_prs, select = c(Source, Cancer, IndVar, Beta, Stderr, Pvalue))
+colnames(tmbh_prs) = colnames(final_glm)
+
+alltmbh = rbind(tmbh_prs, one, two, three, four, five, six)
+
+profile = alltmbh[which(alltmbh$Source=="Profile"),]
+profile = subset(profile, select = -c(Source, SE))
+colnames(profile)[3:4] = c("Profile_Beta","Profile_P")
+tempus = alltmbh[which(alltmbh$Source=="Tempus"),]
+tempus = subset(tempus, select = -c(Source, SE))
+colnames(tempus)[3:4] = c("Tempus_Beta","Tempus_P")
+alltmbh = merge(profile, tempus, by = c("Cancer", "Variable"), all = T)
+
+```
+
+
+```{r}
+NSCLC_surv_IO <- read.csv("~/Downloads/NSCLC_surv_IO (1).csv", stringsAsFactors = F)
+NSCLC_INPUT <- read.delim("~/Desktop/Cancer/Burden/Survival/Non-Small_Cell_Lung_Cancer_INPUT.txt", stringsAsFactors = F)
+
+demographics <- read.csv("~/Desktop/Cancer/Burden/Profile/INPUT/demographics.csv", stringsAsFactors = F)
+colnames(demographics)[1] = "SAMPLE_ID"
+colnames(demographics)[3] = "RELIGION"
+demographics["College"] = NA
+demographics[which(demographics$EDUCATION_LEVEL_NM %in% c("8TH GRADE OR LESS", "SOME HIGH SCHOOL",  "OBTAINED GED", "GRADUATED - HIGH SCHOOL",
+                                                          "SOME TECHNICAL PROGRAM", "SOME VOCATIONAL PROGRAM", "SOME COLLEGE")),"College"] = 0
+demographics[which(demographics$EDUCATION_LEVEL_NM %in% c("GRADUATED - COLLEGE", "GRADUATED - GRAD SCHOOL", "GRADUATED - POST GRADUATE")),"College"] = 1
+demographics$SAMPLE_ID = paste(demographics$SAMPLE_ID,"S1", sep = "_")
+demographics = subset(demographics, select = c(SAMPLE_ID, College))
+
+nsclc = merge(NSCLC_surv_IO, NSCLC_INPUT, by = "SAMPLE_ID")
+nsclc = merge(nsclc, demographics, by = "SAMPLE_ID")
+rm(demographics, NSCLC_INPUT, NSCLC_surv_IO)
+nsclc = subset(nsclc, select = c(tstart, tstop, event, QNORMTMB, `TMB.H`, AGE, SEX, Metastatic, PANEL_VERSION, TUMOR_PURITY, 
+                                 PC1, PC2, PC3, PC4, PC5, EduYears_Per, College))
+colnames(nsclc) = c("tstart", "tstop", "event", "TMB", "TMBH", "Age", "Sex", "Metastatic", "Panel_Version", "Tumor_Purity", 
+                    "PC1", "PC2", "PC3", "PC4", "PC5", "EduYears", "College")
+
+nsclc$Sex = factor(nsclc$Sex, levels = c("Male","Female"))
+nsclc$Metastatic = factor(nsclc$Metastatic, levels = c(0,1), labels = c("Primary","Metastatic"))
+nsclc$Panel_Version = factor(nsclc$Panel_Version, levels = c(1,2,3))
+nsclc$College = factor(nsclc$College, levels = c(0,1), labels = c("No","Yes"))
+library(survival)
+
+summary(coxph(Surv(tstart, tstop, event) ~ TMB*EduYears + College + Age + Sex + Metastatic + Panel_Version + Tumor_Purity + PC1 + PC2 + PC3 + PC4 + PC5, nsclc))
+
+
+
+source("~/Desktop/Cancer/Burden/survival_figures.R")
+source("~/Desktop/Cancer/Burden/Profile/tmbMR.R")
+```
