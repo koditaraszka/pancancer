@@ -1,0 +1,99 @@
+---
+title: "EUR-TMB Matching"
+author: "Kodi Taraszka"
+date: '2023-03-14'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+
+all_theme = theme_bw() + theme(strip.background = element_blank(), axis.text =element_text( size = 12, color = "black"), axis.title = element_text(size = 12, color = "black"), legend.text = element_text(size = 12, color = "black"), legend.title = element_text(size = 12, color = "black"), plot.title = element_text(hjust = 0.5, size=12, color="black"), strip.text = element_text(size = 12, color = "black"), plot.tag = element_text(size=12, color = "black", face = "bold"))
+```
+
+```{r data, include = F}
+tempus <- read.delim("~/Desktop/DFCI/Cancer/Burden/Tempus/panCancer_details_TUMOR.txt", stringsAsFactors = F)
+old = read.delim("~/Desktop/DFCI/Cancer/Burden/Tempus/tempus_details.txt", stringsAsFactors = F)
+old = subset(old, select = c(MATCH, ProjectedPC1_tumor, ProjectedPC2_tumor, ProjectedPC1_normal, ProjectedPC2_normal,
+                             sex, age_at_dx, metastatic, tumor_purity, assay, PC1, PC2, PC3, PC4, PC5))
+tempus = merge(tempus, old, by = c("sex", "age_at_dx", "metastatic", "tumor_purity", "assay", "PC1", "PC2", "PC3", "PC4", "PC5"))
+tempus = subset(tempus, select = c("Cancer", "ProjectedPC1_tumor", "ProjectedPC2_tumor", "ProjectedPC1_normal", "ProjectedPC2_normal",
+                                   "QnormProteinTMB", "age_at_dx", "sex", "metastatic", "assay", "tumor_purity", 
+                                   "PC1", "PC2", "PC3", "PC4", "PC5", "MATCH"))
+colnames(tempus) = c("Cancer", "ProjectedPC1_T", "ProjectedPC2_T", "ProjectedPC1_N", "ProjectedPC2_N",
+                             "TMB", "AGE", "SEX", "Metastatic", "Panel", "Tumor_Purity", "PC1", "PC2", "PC3", "PC4", "PC5", "MATCH")
+
+tempus[which(tempus$Cancer=="bladder"),"Cancer"] = "Bladder_Cancer"
+tempus[which(tempus$Cancer=="breast"),"Cancer"] = "Breast_Carcinoma"
+tempus[which(tempus$Cancer=="colorectal"),"Cancer"] = "Colorectal_Cancer"
+tempus[which(tempus$Cancer=="endometrial"),"Cancer"] = "Endometrial_Cancer"
+tempus[which(tempus$Cancer=="esophagogastric"),"Cancer"] = "Esophagogastric_Carcinoma"
+tempus[which(tempus$Cancer=="glioma"),"Cancer"] = "Glioma"
+tempus[which(tempus$Cancer=="head"),"Cancer"] = "Head_and_Neck_Carcinoma"
+tempus[which(tempus$Cancer=="lung"),"Cancer"] = "Non-Small_Cell_Lung_Cancer"
+tempus[which(tempus$Cancer=="lymphoma"),"Cancer"] = "Non-Hodgkin_Lymphoma"
+tempus[which(tempus$Cancer=="melanoma"),"Cancer"] = "Melanoma"
+tempus[which(tempus$Cancer=="ovarian"),"Cancer"] = "Ovarian_Cancer"
+tempus[which(tempus$Cancer=="pancreatic"),"Cancer"] = "Pancreatic_Cancer"
+tempus[which(tempus$Cancer=="prostate"),"Cancer"] = "Prostate_Cancer"
+tempus[which(tempus$Cancer=="renal"),"Cancer"] = "Renal_Cell_Carcinoma"
+tempus[which(tempus$Cancer=="soft"),"Cancer"] = "Soft_Tissue_Sarcoma"
+tempus[which(tempus$Cancer=="unknown"),"Cancer"] = "Cancer_of_Unknown_Primary"
+tempus["TMB-H"] = 0
+tempus[which(tempus$TMB>=10),"TMB-H"] = 1
+tempus$SEX = factor(tempus$SEX, levels = c(0,1), labels = c("Male", "Female"))
+tempus$Metastatic = factor(tempus$Metastatic, levels = c(0,1), labels = c("Primary", "Metastatic"))
+tempus$Panel = factor(tempus$Panel, levels = c("xT", "xT.v2","xT.v3"))
+tempus["AJnonAJ"] = 0
+tempus[which(tempus$ProjectedPC2_T>=1e-8), "AJnonAJ"] = 1
+tempus["NWSE"] = tempus$ProjectedPC1_T
+tempus[which(tempus$ProjectedPC2_T>=1e-8), "NWSE"] = NA
+tempus$NWSE = scale(tempus$NWSE)
+```
+
+# Using Project PCs in Tumor Samples
+
+Directly from the paper. Green indicates unknown religion
+
+```{r fig1, echo = F}
+ggplot(tempus, aes(ProjectedPC1_T, ProjectedPC2_T)) + geom_point(aes(color = "#00BA38", alpha = 0.8), show.legend = F) +
+                  xlab("NW - SE Cline") + ylab("AJ - non-AJ Cline") + ggtitle("Tempus") + coord_cartesian(ylim=c(-1.5e-9, 2.25e-8), xlim = c(-4.1e-10, 2.3e-8)) +
+                  annotate("text", x=5e-9, y=2.1e-08, label = "Tumor-Normal Samples\nPC1: R = 0.95, PC2: R=0.91") + 
+                  guides(size = "none", color = "none") + geom_hline(yintercept = 1e-8) + 
+                  scale_colour_manual(values = c("#00BA38")) + all_theme +
+                  annotate("text", x=7.5e-11, y=1.01e-8, label="AJ\nnon-AJ") + annotate("text", x=7.5e-11, y=-1.75e-9, label="NW") + annotate("text", x=2.3e-8, y=-1.75e-9, label="SE")
+```
+
+### Preprocessing 
+
+Prior to analyses, I regress out the following covariates onto the quantile normalized TMB:
+
+1. Age
+2. Sex
+3. Metastatic
+4. Panel Version
+5. Tumor Purity
+
+AJ - non AJ is an indicator for whether the cline is greater than or equal to 1E-8.
+NW-SE excludes Ashkenazi Jewish individuals and then scaled
+
+```{r preprocess, echo =F}
+tmbr = lm(TMB ~ as.factor(Cancer) + AGE + SEX + Metastatic + Panel + Tumor_Purity, data = tempus)$residuals
+```
+
+### Analyses
+
+Using the residual after preprocessing, I run anova on the following:
+
+##### TMB ~ AJ-non AJ Indicator + Matching Sample Indicator + Interaction
+
+```{r ajnonaj, echo = F}
+anova(lm(tmbr ~ tempus$AJnonAJ*tempus$MATCH))
+```
+
+##### TMB ~ Northwest-Southeast Cline + Matching Sample Indicator + Interaction
+
+```{r nwse, echo = F}
+anova(lm(tmbr ~ tempus$NWSE*tempus$MATCH))
+```
+
