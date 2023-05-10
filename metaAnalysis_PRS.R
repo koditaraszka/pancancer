@@ -13,6 +13,14 @@ for(cancer in c("Bladder_Cancer","Breast_Carcinoma","Colorectal_Cancer", "Endome
   }
 }
 tcga[which(tcga$Burden=="AllCNB"),"Burden"] = "All CNB"
+tcga[which(tcga$PRS=="BreastCancer_Zhang2020"),"TCGA_Beta"] = -1*as.numeric(tcga[which(tcga$PRS=="BreastCancer_Zhang2020"),"TCGA_Beta"])
+tcga[which(tcga$PRS=="GLIOMA"),"TCGA_Beta"] = -1*as.numeric(tcga[which(tcga$PRS=="GLIOMA"),"TCGA_Beta"])
+tcga[which(tcga$PRS=="UKB_460K.body_BMIz"),"TCGA_Beta"] = -1*as.numeric(tcga[which(tcga$PRS=="UKB_460K.body_BMIz"),"TCGA_Beta"])
+tcga[which(tcga$PRS=="UKB_460K.cov_EDU_YEARS"),"TCGA_Beta"] = -1*as.numeric(tcga[which(tcga$PRS=="UKB_460K.cov_EDU_YEARS"),"TCGA_Beta"])
+tcga[which(tcga$PRS=="UKB_460K.disease_AID_SURE"),"TCGA_Beta"] = -1*as.numeric(tcga[which(tcga$PRS=="UKB_460K.disease_AID_SURE"),"TCGA_Beta"])
+tcga[which(tcga$PRS=="UKB_460K.blood_WHITE_COUNT"),"TCGA_Beta"] = -1*as.numeric(tcga[which(tcga$PRS=="UKB_460K.blood_WHITE_COUNT"),"TCGA_Beta"])
+tcga[which(tcga$PRS=="ProstateCancer_Meta_Schumacher2018"),"TCGA_Beta"] = -1*as.numeric(tcga[which(tcga$PRS=="ProstateCancer_Meta_Schumacher2018"),"TCGA_Beta"])
+
 pancancer=NULL
 for(burden in unique(tcga$Burden)){
   for(prs in unique(tcga$PRS)){
